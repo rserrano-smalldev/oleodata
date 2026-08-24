@@ -157,7 +157,12 @@ async def ensure_ria_stations_cached(session: AsyncSession, adapter: RIAAdapter 
             lat = _parse_dmsh_coord(st["latitud"])
             lon = _parse_dmsh_coord(st["longitud"])
             codigo = st["codigoEstacion"]
-            provincia_id = st["provincia_id"]
+            # La provincia viene anidada: {"provincia": {"id": 14, "nombre":
+            # "Córdoba"}, ...} — NO como "provincia_id" a nivel superior
+            # (verificado con datos reales; una versión anterior de este
+            # código asumía top-level y descartaba TODAS las estaciones).
+            provincia = st["provincia"]
+            provincia_id = provincia["id"]
         except (KeyError, TypeError, ValueError) as exc:
             dropped.append((st, exc))
             continue
@@ -180,8 +185,10 @@ async def ensure_ria_stations_cached(session: AsyncSession, adapter: RIAAdapter 
                 "metadata_json": {
                     "provincia_id": provincia_id,
                     "codigo_estacion": codigo,
-                    "provincia_nombre": st.get("provincia_nombre"),
+                    "provincia_nombre": provincia.get("nombre"),
                     "bajoplastico": st.get("bajoplastico"),
+                    "activa": st.get("activa"),
+                    "visible": st.get("visible"),
                 },
             }
         )

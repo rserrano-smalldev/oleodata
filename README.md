@@ -260,8 +260,17 @@ desarrollo). API pública, sin API key, solo cubre Andalucía.
      compuesto `"{provincia_id}:{codigoEstacion}"` (que es exactamente como
      la propia RIA direcciona sus estaciones), con `codigo_estacion` y
      `provincia_id` conservados por separado en `metadata_json` para las
-     llamadas a `datosdiarios`. Con este arreglo, IFAPA Hinojosa del Duque
-     ya se cachea y se usa correctamente para la finca de referencia.
+     llamadas a `datosdiarios`.
+  3. Al probar el punto anterior contra la API real, la primera versión de
+     este arreglo asumía `provincia_id` como campo de nivel superior —
+     también sin poder verificarlo en vivo desde este entorno — y volvió a
+     descartar las 123 estaciones en bloque. La forma real, confirmada con
+     una respuesta real de producción, anida la provincia:
+     `{"provincia": {"id": 14, "nombre": "Córdoba"}, "codigoEstacion": "2",
+     ...}`. Corregido para leer `st["provincia"]["id"]`, con un test que usa
+     valores DMSH reales (estación "Adamuz") además de los sintéticos.
+  Con los tres arreglos, IFAPA Hinojosa del Duque ya se cachea y se usa
+  correctamente para la finca de referencia.
 - **Regla "menos de 15 km"**: al dar de alta una parcela (y también vía
   `POST /v1/parcels/{id}/ria/sync`), si hay una estación RIA real a menos de
   `ria_max_distance_km` (15 km, distancia puramente **horizontal** — no la

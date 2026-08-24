@@ -29,10 +29,35 @@ IMPORTANTE — formato de coordenadas: `estaciones` NO devuelve `latitud`/
 `"DDMMSSsssH"` (grados 2 dígitos, minutos 2 dígitos, segundos×1000 en 5
 dígitos, y una letra de hemisferio N/S/E/W), verificado en el código fuente
 de `meteospain` (`R/utils.R`, función `.parse_coords_dmsh`, autor Rubén F.
-Casal). Este adaptador devuelve esos campos EN CRUDO, tal cual los da la
+Casal) y confirmado contra una respuesta real (p.ej. Adamuz, Córdoba:
+`"latitud": "375951000N"`, `"longitud": "042643000W"` → 37.9975 N,
+-4.445 W). Este adaptador devuelve esos campos EN CRUDO, tal cual los da la
 API (fetch_stations no los convierte): quien los use debe decodificarlos —
 ver `app/services/ria_sync.py::_parse_dmsh_coord`, que también acepta
 grados decimales por si la API cambia de formato en el futuro.
+
+IMPORTANTE — forma real de cada estación en `estaciones` (confirmada con
+una respuesta real, no solo con `meteospain`): la provincia viene ANIDADA,
+no como `provincia_id` a nivel superior —
+
+    {
+      "provincia": {"id": 14, "nombre": "Córdoba"},
+      "codigoEstacion": "2", "nombre": "Adamuz",
+      "bajoplastico": false, "activa": true, "visible": true,
+      "longitud": "042643000W", "latitud": "375951000N", "altitud": 145,
+      "xutm": 373099.0, "yutm": 4206530.0, "huso": 30
+    }
+
+`codigoEstacion` **solo es único dentro de su provincia**, no en toda la
+red (confirmado: la propia web de RIA direcciona sus estaciones como
+`/riaweb/web/estacion/{provincia_id}/{codigoEstacion}`) — dos provincias
+distintas pueden tener cada una una estación con el mismo número. Cualquier
+código que trate `codigoEstacion` como clave global por sí solo descartará
+estaciones reales en silencio (ver `ria_sync.py::ensure_ria_stations_cached`,
+que usa el par `(provincia_id, codigoEstacion)` como clave). `activa` y
+`visible` no se usan todavía para filtrar el listado (no se ha verificado
+qué significan exactamente); `xutm`/`yutm`/`huso` (coordenadas UTM
+alternativas) tampoco se usan, solo `latitud`/`longitud`.
 """
 
 from datetime import date
@@ -54,9 +79,9 @@ class RIAAdapter:
     async def fetch_stations(self) -> list[dict]:
         """Devuelve TODAS las estaciones de la red, con sus coordenadas reales.
 
-        Campos esperados por estación (ver docstring del módulo):
-        codigoEstacion, nombre, provincia_nombre, provincia_id, altitud,
-        longitud, latitud, bajoplastico.
+        Campos esperados por estación (ver docstring del módulo, con la forma
+        real completa): codigoEstacion, nombre, provincia (anidado, con id y
+        nombre), altitud, longitud, latitud, bajoplastico, activa, visible.
         """
         client = self._client or httpx.AsyncClient(timeout=30)
         owns_client = self._client is None

@@ -143,6 +143,12 @@ def test_parse_dmsh_coord_matches_meteospain_formula():
     assert _parse_dmsh_coord("38.521823") == 38.521823
     assert _parse_dmsh_coord(-5.159543633627551) == -5.159543633627551
 
+    # Valores REALES devueltos por la API en producción (estación "Adamuz",
+    # Córdoba): confirma el formato contra datos de verdad, no solo contra
+    # la fórmula de meteospain.
+    assert round(_parse_dmsh_coord("375951000N"), 4) == round(37.9975, 4)
+    assert round(_parse_dmsh_coord("042643000W"), 4) == round(-4.445277777777778, 4)
+
 
 async def test_ensure_ria_stations_cached_decodes_real_dmsh_coordinate_format(db_session):
     """Reproduce el formato REAL de la API (no el decimal simplificado que
@@ -161,8 +167,7 @@ async def test_ensure_ria_stations_cached_decodes_real_dmsh_coordinate_format(db
             {
                 "codigoEstacion": NEAR_STATION_CODE,
                 "nombre": "IFAPA Hinojosa del Duque (test)",
-                "provincia_id": 5,
-                "provincia_nombre": "Córdoba",
+                "provincia": {"id": 5, "nombre": "Córdoba"},
                 "altitud": 608,
                 "latitud": hinojosa_lat_dmsh,
                 "longitud": hinojosa_lon_dmsh,
@@ -207,8 +212,7 @@ async def test_ensure_ria_stations_cached_deduplicates_repeated_station_codes(db
             {
                 "codigoEstacion": NEAR_STATION_CODE,
                 "nombre": "Estación de test cercana",
-                "provincia_id": 5,
-                "provincia_nombre": "Córdoba",
+                "provincia": {"id": 5, "nombre": "Córdoba"},
                 "altitud": 545,
                 "latitud": PARCEL_LAT + 0.01,
                 "longitud": PARCEL_LON,
@@ -219,8 +223,7 @@ async def test_ensure_ria_stations_cached_deduplicates_repeated_station_codes(db
                 # en la respuesta real.
                 "codigoEstacion": NEAR_STATION_CODE,
                 "nombre": "Estación de test cercana",
-                "provincia_id": 5,
-                "provincia_nombre": "Córdoba",
+                "provincia": {"id": 5, "nombre": "Córdoba"},
                 "altitud": 545,
                 "latitud": PARCEL_LAT + 0.01,
                 "longitud": PARCEL_LON,
@@ -251,8 +254,7 @@ async def test_ensure_ria_stations_cached_keeps_same_codigo_estacion_in_differen
             {
                 "codigoEstacion": same_code,
                 "nombre": "Huéneja (otra provincia, mismo código)",
-                "provincia_id": TEST_PROVINCIA_ID,
-                "provincia_nombre": "Córdoba",
+                "provincia": {"id": TEST_PROVINCIA_ID, "nombre": "Córdoba"},
                 "altitud": 500,
                 "latitud": PARCEL_LAT + 0.01,
                 "longitud": PARCEL_LON,
@@ -261,8 +263,7 @@ async def test_ensure_ria_stations_cached_keeps_same_codigo_estacion_in_differen
             {
                 "codigoEstacion": same_code,
                 "nombre": "IFAPA Hinojosa del Duque (test)",
-                "provincia_id": OTHER_TEST_PROVINCIA_ID,
-                "provincia_nombre": "Córdoba",
+                "provincia": {"id": OTHER_TEST_PROVINCIA_ID, "nombre": "Córdoba"},
                 "altitud": 608,
                 "latitud": PARCEL_LAT + 0.02,
                 "longitud": PARCEL_LON,
@@ -306,8 +307,7 @@ async def test_ensure_ria_stations_cached_is_idempotent_and_does_not_refetch(db_
             {
                 "codigoEstacion": NEAR_STATION_CODE,
                 "nombre": "Estación de test cercana",
-                "provincia_id": 5,
-                "provincia_nombre": "Córdoba",
+                "provincia": {"id": 5, "nombre": "Córdoba"},
                 "altitud": 545,
                 "latitud": PARCEL_LAT + 0.01,  # ~1.1 km al norte
                 "longitud": PARCEL_LON,
@@ -316,8 +316,7 @@ async def test_ensure_ria_stations_cached_is_idempotent_and_does_not_refetch(db_
             {
                 "codigoEstacion": FAR_STATION_CODE,
                 "nombre": "Estación de test lejana",
-                "provincia_id": 5,
-                "provincia_nombre": "Córdoba",
+                "provincia": {"id": 5, "nombre": "Córdoba"},
                 "altitud": 600,
                 "latitud": PARCEL_LAT + 0.2,  # ~22 km al norte
                 "longitud": PARCEL_LON,
