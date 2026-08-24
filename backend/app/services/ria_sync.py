@@ -151,13 +151,14 @@ async def ensure_ria_stations_cached(session: AsyncSession, adapter: RIAAdapter 
     stations = await adapter.fetch_stations()
 
     rows = []
+    dropped = []
     for st in stations:
         try:
             lat = _parse_dmsh_coord(st["latitud"])
             lon = _parse_dmsh_coord(st["longitud"])
             codigo = st["codigoEstacion"]
-        except (KeyError, TypeError, ValueError):
-            logger.warning("Estación RIA con campos incompletos, se ignora: %r", st)
+        except (KeyError, TypeError, ValueError) as exc:
+            dropped.append((st, exc))
             continue
         altitud = st.get("altitud")
         rows.append(
@@ -174,6 +175,24 @@ async def ensure_ria_stations_cached(session: AsyncSession, adapter: RIAAdapter 
                 },
             }
         )
+
+    # Resumen SIEMPRE visible (no solo cuando se descarta todo): la API
+    # devolvió N estaciones, M no se pudieron interpretar. Un descarte
+    # PARCIAL es tan sospechoso como uno total — ya ha pasado una vez que
+    # justo las estaciones de una zona concreta fallaban el parseo y
+    # sobrevivían igualmente decenas de otras, así que "cachea 28 de ~100 y
+    # sigue sin ninguna cerca" no debe pasar desapercibido en el log.
+    logger.info(
+        "RIA: la API devolvió %d estaciones, %d se pudieron interpretar (%d descartadas).",
+        len(stations),
+        len(rows),
+        len(dropped),
+    )
+    if dropped:
+        for st, exc in dropped[:5]:
+            logger.warning("RIA: estación descartada (%s): %r", exc, st)
+        if len(dropped) > 5:
+            logger.warning("RIA: %d estaciones descartadas más (no se listan todas).", len(dropped) - 5)
 
     if stations and not rows:
         # Si ninguna estación de una respuesta no vacía se pudo cachear, es
