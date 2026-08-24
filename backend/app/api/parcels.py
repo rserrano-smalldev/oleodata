@@ -32,7 +32,12 @@ from app.services.daily_series import get_daily_series, get_raw_observations
 from app.services.discovery import discover_sources
 from app.services.forecast import fetch_and_store_forecast
 from app.services.openmeteo_client import fetch_elevation
-from app.services.ria_sync import ensure_ria_stations_cached, find_nearby_ria_station, sync_parcel_ria
+from app.services.ria_sync import (
+    count_cached_ria_stations,
+    ensure_ria_stations_cached,
+    find_nearby_ria_station,
+    sync_parcel_ria,
+)
 from app.services.simulator import NoHistoryError, simulate_sensor_readings
 from app.services.sources import get_or_create_source
 
@@ -351,20 +356,35 @@ async def ria_sync(parcel_id: int, session: AsyncSession = Depends(get_session))
     """
     parcel = await _get_parcel_or_404(session, parcel_id)
     await ensure_ria_stations_cached(session)
+    cached_station_count = await count_cached_ria_stations(session)
     nearby = await find_nearby_ria_station(session, parcel.latitude, parcel.longitude)
     if nearby is None:
+        # Diagnóstico: aunque no haya ninguna dentro del radio, decir cuál es
+        # la más cercana de verdad (sin límite de distancia) ayuda a
+        # distinguir "no hay estación cerca" de "algo falla en el cacheado".
+        closest_anywhere = await find_nearby_ria_station(
+            session, parcel.latitude, parcel.longitude, max_km=100_000
+        )
+        closest_note = (
+            f" La más cercana en toda la caché es '{closest_anywhere.station.name}' "
+            f"a {closest_anywhere.horizontal_km:.1f} km."
+            if closest_anywhere is not None
+            else " No hay ninguna estación RIA cacheada en absoluto."
+        )
         return {
             "station_found": False,
+            "cached_station_count": cached_station_count,
             "note": (
                 "Ninguna estación RIA real a menos de "
                 f"{get_settings().ria_max_distance_km:.0f} km de esta parcela "
-                "(RIA solo cubre Andalucía)."
+                f"(RIA solo cubre Andalucía).{closest_note}"
             ),
         }
 
     summary = await sync_parcel_ria(session, parcel, nearby)
     return {
         "station_found": True,
+        "cached_station_count": cached_station_count,
         "source_id": summary.source_id,
         "station_code": summary.station_code,
         "station_name": summary.station_name,

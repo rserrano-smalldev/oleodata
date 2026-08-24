@@ -219,6 +219,21 @@ async def ensure_ria_stations_cached(session: AsyncSession, adapter: RIAAdapter 
     return len(rows)
 
 
+async def count_cached_ria_stations(session: AsyncSession) -> int:
+    """Cuántas estaciones RIA hay AHORA MISMO en `station`, vistas desde esta
+    misma sesión/conexión de la API. Puramente diagnóstico: si este número no
+    coincide con lo que se ve haciendo `psql` directamente contra el
+    contenedor `db`, la API y ese `psql` no están hablando con la misma base
+    de datos (por ejemplo, dos proyectos de Docker Compose con distinto
+    volumen)."""
+    provider = await get_provider_by_code(session, "ria_andalucia")
+    return (
+        await session.execute(
+            select(func.count()).select_from(Station).where(Station.provider_id == provider.id)
+        )
+    ).scalar_one()
+
+
 async def find_nearby_ria_station(
     session: AsyncSession, lat: float, lon: float, max_km: float | None = None
 ) -> NearbyStation | None:
