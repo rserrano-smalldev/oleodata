@@ -210,13 +210,39 @@ async def ensure_ria_stations_cached(session: AsyncSession, adapter: RIAAdapter 
     if not rows:
         return 0
 
+    distinct_codes = {r["code"] for r in rows}
+    if len(distinct_codes) < len(rows):
+        # La API real de RIA devuelve, para al menos algunas estaciones,
+        # varias filas con el MISMO codigoEstacion (posiblemente una por
+        # tipo de dato/resolución disponible en esa estación). El UNIQUE
+        # (provider_id, code) hace que solo la primera de cada código
+        # sobreviva — es la explicación real de por qué "123 estaciones
+        # devueltas" termina en muchas menos filas en `station`, y no un bug
+        # de descarte silencioso: se deja constancia explícita aquí.
+        logger.warning(
+            "RIA: la API devolvió %d filas pero solo %d codigoEstacion distintos — "
+            "hay estaciones con varias filas repetidas (mismo código), de las que solo "
+            "se conserva una. El número real de estaciones físicas es %d, no %d.",
+            len(rows), len(distinct_codes), len(distinct_codes), len(rows),
+        )
+
     stmt = pg_insert(Station).values(rows).on_conflict_do_nothing(
         index_elements=["provider_id", "code"]
     )
     await session.execute(stmt)
     await session.commit()
-    logger.info("RIA: %d estaciones reales cacheadas en `station`.", len(rows))
-    return len(rows)
+
+    final_count = (
+        await session.execute(
+            select(func.count()).select_from(Station).where(Station.provider_id == provider.id)
+        )
+    ).scalar_one()
+    logger.info(
+        "RIA: %d estaciones reales en `station` tras esta sincronización (de %d filas candidatas, "
+        "%d códigos distintos).",
+        final_count, len(rows), len(distinct_codes),
+    )
+    return final_count
 
 
 async def count_cached_ria_stations(session: AsyncSession) -> int:

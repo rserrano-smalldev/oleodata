@@ -177,6 +177,50 @@ async def test_ensure_ria_stations_cached_decodes_real_dmsh_coordinate_format(db
     await _clean_ria_test_fixtures(db_session)
 
 
+async def test_ensure_ria_stations_cached_deduplicates_repeated_station_codes(db_session):
+    """Reproduce lo observado en producción: la API real de `estaciones`
+    devolvió 123 filas pero solo 28 llegaron a `station` — no por un bug de
+    parseo (0 descartadas), sino porque varias filas comparten el mismo
+    `codigoEstacion` (posiblemente una fila por tipo de dato/resolución
+    disponible en esa estación física). El valor devuelto por
+    ensure_ria_stations_cached debe reflejar el recuento REAL de filas en
+    `station` tras la deduplicación por (provider_id, code), no el número de
+    filas candidatas antes de insertar."""
+    await _clean_ria_test_fixtures(db_session)
+
+    fake = FakeRIAAdapter(
+        stations=[
+            {
+                "codigoEstacion": NEAR_STATION_CODE,
+                "nombre": "Estación de test cercana",
+                "provincia_id": 5,
+                "provincia_nombre": "Córdoba",
+                "altitud": 545,
+                "latitud": PARCEL_LAT + 0.01,
+                "longitud": PARCEL_LON,
+                "bajoplastico": False,
+            },
+            {
+                # Mismo codigoEstacion que la anterior: fila repetida, como
+                # en la respuesta real.
+                "codigoEstacion": NEAR_STATION_CODE,
+                "nombre": "Estación de test cercana",
+                "provincia_id": 5,
+                "provincia_nombre": "Córdoba",
+                "altitud": 545,
+                "latitud": PARCEL_LAT + 0.01,
+                "longitud": PARCEL_LON,
+                "bajoplastico": False,
+            },
+        ]
+    )
+
+    count = await ensure_ria_stations_cached(db_session, adapter=fake)
+    assert count == 1  # una sola fila física, no 2
+
+    await _clean_ria_test_fixtures(db_session)
+
+
 async def test_ensure_ria_stations_cached_is_idempotent_and_does_not_refetch(db_session):
     provider = await _clean_ria_test_fixtures(db_session)
 

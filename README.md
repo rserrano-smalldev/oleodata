@@ -225,7 +225,13 @@ real — ver la sección siguiente.
 Adaptador real en `app/services/ria_client.py`, verificado contra el código
 fuente abierto del paquete R `meteospain` (no se pudo acceder directamente a
 la documentación oficial de juntadeandalucia.es desde el entorno de
-desarrollo). API pública, sin API key, ~100 estaciones, solo cubre Andalucía.
+desarrollo). API pública, sin API key, solo cubre Andalucía. La cifra de
+"~100 estaciones" que se repite en foros/documentación de terceros
+corresponde a **filas** de la respuesta de `estaciones`, no a estaciones
+físicas distintas: en pruebas reales, la API devolvió 123 filas pero solo
+~28 `codigoEstacion` únicos (varias filas comparten el mismo código,
+probablemente una fila por tipo de dato o resolución disponible en esa
+estación) — ver el aviso de deduplicación más abajo.
 
 - **Caché de estaciones** (`app/services/ria_sync.py`): se trae el listado
   real de estaciones y se cachea en `station` (idempotente,
@@ -245,6 +251,18 @@ desarrollo). API pública, sin API key, ~100 estaciones, solo cubre Andalucía.
   ninguna estación real y la regla de los 15 km nunca encontraba nada
   (p.ej. IFAPA Hinojosa del Duque, Córdoba) aunque existiera. Corregido en
   `_parse_dmsh_coord` (con test de regresión).
+  **Hallazgo real posterior**: con el parseo ya corregido (0 filas
+  descartadas), la API devolvió 123 filas pero `station` terminó con solo
+  ~28 — no por otro bug, sino porque varias filas de la API comparten el
+  mismo `codigoEstacion` y el `UNIQUE (provider_id, code)` solo conserva la
+  primera de cada una. El log ahora distingue explícitamente "filas
+  devueltas" de "estaciones físicas distintas" (`ensure_ria_stations_cached`
+  ya no confundía candidatas con filas realmente insertadas). Con el listado
+  completo y correcto, la estación real más cercana a la finca de referencia
+  (Los Pedroches, Córdoba) sigue estando a más de 85 km: RIA, al ser una red
+  agroclimática centrada en zonas de regadío/invernadero, no tiene cobertura
+  en esa comarca de dehesa — esto no es un fallo del código, es una
+  limitación real y documentada de la cobertura de RIA.
 - **Regla "menos de 15 km"**: al dar de alta una parcela (y también vía
   `POST /v1/parcels/{id}/ria/sync`), si hay una estación RIA real a menos de
   `ria_max_distance_km` (15 km, distancia puramente **horizontal** — no la
