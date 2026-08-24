@@ -13,6 +13,7 @@ class ProviderType(str, enum.Enum):
     station_network = "station_network"
     reanalysis = "reanalysis"
     simulated_sensor = "simulated_sensor"
+    forecast = "forecast"
 
 
 class QualityFlag(str, enum.Enum):

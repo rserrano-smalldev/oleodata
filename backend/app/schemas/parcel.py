@@ -28,6 +28,7 @@ class ParcelOut(BaseModel):
     field_capacity_mm: float
     sensorization_status: str
     created_at: datetime
+    initial_backfill_note: str | None = None
 
     model_config = {"from_attributes": True}
 

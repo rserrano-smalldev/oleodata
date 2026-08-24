@@ -7,6 +7,7 @@ from geoalchemy2 import WKTElement
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.db import get_session
 from app.models.catalog import DataProvider, Variable
 from app.models.parcel import Parcel
@@ -23,9 +24,10 @@ from app.schemas.parcel import (
 from app.schemas.recommendations import RecommendationsOut
 from app.schemas.timeseries import DailySeriesOut, DailyVariablePoint
 from app.services.agronomy import engine as recommendations_engine
-from app.services.backfill import backfill_parcel_era5
+from app.services.backfill import backfill_parcel_era5, sync_parcel_era5
 from app.services.daily_series import get_daily_series, get_raw_observations
 from app.services.discovery import discover_sources
+from app.services.forecast import fetch_and_store_forecast
 from app.services.openmeteo_client import fetch_elevation
 from app.services.simulator import NoHistoryError, simulate_sensor_readings
 from app.services.sources import get_or_create_source
@@ -43,7 +45,9 @@ async def _get_parcel_or_404(session: AsyncSession, parcel_id: int) -> Parcel:
     return parcel
 
 
-def _parcel_to_out(parcel: Parcel, variety_code: str | None) -> ParcelOut:
+def _parcel_to_out(
+    parcel: Parcel, variety_code: str | None, initial_backfill_note: str | None = None
+) -> ParcelOut:
     return ParcelOut(
         id=parcel.id,
         code=parcel.code,
@@ -56,6 +60,7 @@ def _parcel_to_out(parcel: Parcel, variety_code: str | None) -> ParcelOut:
         field_capacity_mm=parcel.field_capacity_mm,
         sensorization_status=parcel.sensorization_status.value,
         created_at=parcel.created_at,
+        initial_backfill_note=initial_backfill_note,
     )
 
 
@@ -112,7 +117,25 @@ async def create_parcel(payload: ParcelCreate, session: AsyncSession = Depends(g
     await session.commit()
     await session.refresh(parcel)
 
-    return _parcel_to_out(parcel, payload.variety_code)
+    settings = get_settings()
+    try:
+        summary = await sync_parcel_era5(
+            session, parcel, initial_years_back=settings.initial_backfill_years_back
+        )
+        note = (
+            f"Histórico ERA5-Land importado automáticamente: {summary.rows_fetched} lecturas "
+            f"horarias reales ({summary.start_date} → {summary.end_date})."
+        )
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "No se pudo importar el histórico automático de ERA5-Land para %s: %s", payload.code, exc
+        )
+        note = (
+            "No se ha podido importar el histórico automáticamente (fallo de red con Open-Meteo). "
+            "Usa el botón de importar histórico en el panel de la parcela para reintentarlo."
+        )
+
+    return _parcel_to_out(parcel, payload.variety_code, initial_backfill_note=note)
 
 
 @router.get("/{parcel_id}", response_model=ParcelOut)
@@ -195,6 +218,55 @@ async def backfill(parcel_id: int, payload: BackfillRequest, session: AsyncSessi
         "rows_fetched": summary.rows_fetched,
         "chunks": summary.chunks,
         "note": "Histórico REAL de Open-Meteo / ERA5-Land (CC BY 4.0), no simulado.",
+    }
+
+
+@router.post("/{parcel_id}/backfill/sync")
+async def backfill_sync(parcel_id: int, session: AsyncSession = Depends(get_session)):
+    """Trae solo lo que falta desde el último dato guardado hasta hoy (si la
+    parcela no tiene histórico todavía, hace el backfill inicial de
+    `initial_backfill_years_back` años, igual que al darla de alta)."""
+    parcel = await _get_parcel_or_404(session, parcel_id)
+    settings = get_settings()
+    summary = await sync_parcel_era5(
+        session, parcel, initial_years_back=settings.initial_backfill_years_back
+    )
+    return {
+        "source_id": summary.source_id,
+        "start_date": summary.start_date,
+        "end_date": summary.end_date,
+        "rows_fetched": summary.rows_fetched,
+        "chunks": summary.chunks,
+        "already_up_to_date": summary.already_up_to_date,
+        "note": (
+            "Ya estaba al día, no había nada nuevo que importar."
+            if summary.already_up_to_date
+            else "Histórico REAL de Open-Meteo / ERA5-Land (CC BY 4.0) actualizado hasta hoy."
+        ),
+    }
+
+
+@router.post("/{parcel_id}/fetch-forecast")
+async def fetch_forecast(parcel_id: int, session: AsyncSession = Depends(get_session)):
+    """Trae la previsión REAL de Open-Meteo para los próximos días (por
+    defecto `forecast_days_ahead`, 7). Reemplaza la previsión anterior de
+    esta parcela por completo: no tiene sentido acumular previsiones viejas.
+    """
+    parcel = await _get_parcel_or_404(session, parcel_id)
+    settings = get_settings()
+    summary = await fetch_and_store_forecast(session, parcel, days_ahead=settings.forecast_days_ahead)
+    return {
+        "source_id": summary.source_id,
+        "fetched_at": summary.fetched_at,
+        "start": summary.start,
+        "end": summary.end,
+        "rows_written": summary.rows_written,
+        "days_ahead": summary.days_ahead,
+        "is_simulated": False,
+        "note": (
+            "Previsión REAL de Open-Meteo, no histórico ni simulación. Se reemplaza "
+            "por completo cada vez que se refresca."
+        ),
     }
 
 
@@ -335,6 +407,7 @@ async def recommendations(parcel_id: int, day: date, session: AsyncSession = Dep
     return RecommendationsOut(
         day=result.day,
         variety_code=result.variety_code,
+        data_basis=result.data_basis,
         threats=result.threats,
         water_balance=result.water_balance,
         not_dynamically_modeled_threats=result.not_dynamically_modeled_threats,

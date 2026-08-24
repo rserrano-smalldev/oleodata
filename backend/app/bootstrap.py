@@ -42,6 +42,14 @@ async def init_db(engine: AsyncEngine) -> None:
 
         await conn.run_sync(Base.metadata.create_all)
 
+        # Añadir un valor nuevo a un ENUM de Postgres no lo hace create_all()
+        # si el tipo ya existía de una versión anterior del esquema (create_all
+        # solo emite CREATE TYPE cuando el tipo no existe todavía). ADD VALUE
+        # IF NOT EXISTS es seguro llamarlo siempre: no falla en bases nuevas
+        # (donde el tipo ya se creó con este valor incluido) ni en bases
+        # existentes que vengan de antes de añadir el proveedor de previsión.
+        await conn.execute(text("ALTER TYPE provider_type ADD VALUE IF NOT EXISTS 'forecast'"))
+
         await conn.execute(text(EFFECTIVE_DISTANCE_FUNCTION_SQL))
 
         await conn.execute(

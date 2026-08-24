@@ -2,6 +2,10 @@
 {% block title %}OleaData — {{ parcel.code }}{% endblock %}
 {% block content %}
 
+{% if note %}
+<div class="demo-banner">{{ note }}</div>
+{% endif %}
+
 <div class="card">
   <h2>{{ parcel.code }} — {{ parcel.name }}</h2>
   <p class="small">
@@ -29,10 +33,31 @@
 
 <div class="card">
   <h2>Histórico climático REAL (ERA5-Land / Open-Meteo)</h2>
-  <p class="small">Descarga y almacena hasta 25 años de histórico real de esta parcela.</p>
-  <button onclick="runBackfill({{ parcel.id }})">Importar histórico de 25 años</button>
+  <p class="small">
+    Al dar de alta la parcela se importaron automáticamente los últimos 5 años. Usa estos botones
+    para traer lo que falte desde entonces hasta hoy, o para profundizar el histórico.
+  </p>
+  <button onclick="runSync({{ parcel.id }})">Importar lo que falta hasta hoy</button>
+  <button class="secondary" onclick="runFullBackfill({{ parcel.id }})">Importar histórico completo (25 años)</button>
   <span id="backfill-status" class="small"></span>
   <canvas id="historyChart" height="90"></canvas>
+
+  <h3>Consultar histórico en tabla</h3>
+  <div class="row">
+    <div><label>Desde</label><input type="date" id="hist-start"></div>
+    <div><label>Hasta</label><input type="date" id="hist-end"></div>
+  </div>
+  <div class="check-row" id="hist-variables">
+    <label><input type="checkbox" value="temperature_2m" checked> Temperatura</label>
+    <label><input type="checkbox" value="precipitation" checked> Precipitación</label>
+    <label><input type="checkbox" value="relative_humidity_2m"> Humedad relativa</label>
+    <label><input type="checkbox" value="wind_speed_10m"> Viento</label>
+    <label><input type="checkbox" value="shortwave_radiation"> Radiación</label>
+    <label><input type="checkbox" value="soil_moisture_7_28cm"> Humedad suelo</label>
+    <label><input type="checkbox" value="et0_fao_evapotranspiration"> ET0</label>
+  </div>
+  <button onclick="applyHistoryFilter({{ parcel.id }})">Aplicar filtro</button>
+  <div id="history-table" class="table-wrap"></div>
 </div>
 
 <div class="card">
@@ -44,11 +69,35 @@
   <button onclick="runSimulate({{ parcel.id }})">Simular sensores del último mes</button>
   <span id="simulate-status" class="small"></span>
   <canvas id="simulatedChart" height="90"></canvas>
+
+  <h3>Consultar lecturas simuladas en tabla</h3>
+  <div class="row">
+    <div><label>Desde</label><input type="datetime-local" id="sim-start"></div>
+    <div><label>Hasta</label><input type="datetime-local" id="sim-end"></div>
+  </div>
+  <div class="check-row" id="sim-variables">
+    <label><input type="checkbox" value="temperature_2m" checked> Temperatura</label>
+    <label><input type="checkbox" value="leaf_wetness" checked> Humectación foliar</label>
+    <label><input type="checkbox" value="precipitation" checked> Precipitación</label>
+  </div>
+  <button onclick="applySimulatedFilter({{ parcel.id }})">Aplicar filtro</button>
+  <div id="simulated-table" class="table-wrap"></div>
+</div>
+
+<div class="card">
+  <h2>Previsión meteorológica (próximos días) <span class="tag real">REAL</span></h2>
+  <p class="small">
+    Previsión real de Open-Meteo (no histórico, no simulación). Se usa para las recomendaciones de
+    días futuros y se reemplaza por completo cada vez que se refresca.
+  </p>
+  <button onclick="runFetchForecast({{ parcel.id }})">Traer previsión (7 días)</button>
+  <span id="forecast-status" class="small"></span>
+  <div id="forecast-table" class="table-wrap"></div>
 </div>
 
 <div class="card">
   <h2>Recomendaciones</h2>
-  <label>Día a evaluar</label>
+  <label>Día a evaluar (puede ser un día futuro dentro de la previsión)</label>
   <input type="date" id="rec-day" value="{{ default_day }}" onchange="loadRecommendations({{ parcel.id }})">
   <div id="recommendations-panel">cargando…</div>
 </div>
@@ -56,6 +105,9 @@
 <script src="/static/js/app.js"></script>
 <script>
   const PARCEL_ID = {{ parcel.id }};
-  document.addEventListener("DOMContentLoaded", () => loadRecommendations(PARCEL_ID));
+  document.addEventListener("DOMContentLoaded", () => {
+    setDefaultFilterDates();
+    loadRecommendations(PARCEL_ID);
+  });
 </script>
 {% endblock %}

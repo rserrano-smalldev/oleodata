@@ -75,6 +75,34 @@ PROVIDERS = [
         "notes": "Sin adaptador implementado en este MVP. Catalogado para no requerir migración futura.",
     },
     {
+        "code": "open_meteo_forecast",
+        "name": "Open-Meteo Forecast API (previsión a corto plazo)",
+        "type": "forecast",
+        "coverage_geom": None,  # cobertura global
+        # Peor prioridad que ERA5-Land (50): en el raro caso de solape de un
+        # día entre histórico ya publicado y previsión ya descargada, debe
+        # ganar siempre el dato histórico confirmado, nunca una previsión.
+        "base_priority": 55,
+        "adapter_name": "app.services.openmeteo_client.OpenMeteoForecastAdapter",
+        "has_adapter": True,
+        "variables_supported": [
+            "temperature_2m",
+            "relative_humidity_2m",
+            "precipitation",
+            "wind_speed_10m",
+            "shortwave_radiation",
+            "et0_fao_evapotranspiration",
+        ],
+        "license": "CC BY 4.0",
+        "notes": (
+            "Previsión meteorológica REAL (no reanálisis, no histórico): los valores de "
+            "días futuros cambian cada vez que se refresca, por lo que sus observaciones "
+            "se reemplazan en cada actualización en vez de acumularse. Usada solo para "
+            "recomendaciones de los próximos días (ver módulo de previsión), nunca para "
+            "reconstruir histórico."
+        ),
+    },
+    {
         "code": "sim_sensor_v1",
         "name": "Simulador de sensor de parcela (puente hasta hardware real)",
         "type": "simulated_sensor",

@@ -26,6 +26,7 @@ class WaterBalanceOut(BaseModel):
 class RecommendationsOut(BaseModel):
     day: date
     variety_code: str | None
+    data_basis: str
     threats: list[ThreatRecommendationOut]
     water_balance: WaterBalanceOut | None
     not_dynamically_modeled_threats: list[str]

@@ -42,6 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.catalog import Variable
 from app.models.parcel import Parcel
 from app.models.timeseries import Observation, Source
+from app.services.agronomy.leaf_wetness_model import compute_hourly_wetness
 from app.services.sources import get_or_create_source, get_provider_by_code
 
 logger = logging.getLogger(__name__)
@@ -50,15 +51,6 @@ SAMPLE_INTERVAL_MINUTES = 15
 TEMPERATURE_OFFSET_RANGE_C = (-0.8, 0.8)
 TEMPERATURE_NOISE_RANGE_C = (-0.3, 0.3)
 RAIN_TIP_MM = 0.2
-
-# --- Modelo de humectación foliar derivado (aproximación explícita) ---
-WETNESS_RH_THRESHOLD = 90.0
-WETNESS_WETTING_RATE = 0.34  # alcanza 1.0 en ~3 horas de condición de mojado
-WETNESS_BASE_DRYING_RATE = 0.08
-WETNESS_RADIATION_DRYING_FACTOR = 0.15  # a más radiación, más secado
-WETNESS_RADIATION_REF_WM2 = 500.0
-WETNESS_WIND_DRYING_FACTOR = 0.05
-WETNESS_WIND_REF_KMH = 20.0
 
 
 class NoHistoryError(ValueError):
@@ -108,39 +100,6 @@ def _interp_series(series: dict[datetime, float], targets: list[datetime]) -> np
     y = np.array([series[t] for t in xs])
     t_epoch = np.array([t.timestamp() for t in targets])
     return np.interp(t_epoch, x_epoch, y)
-
-
-def _compute_hourly_wetness(
-    rh_series: dict[datetime, float],
-    precip_series: dict[datetime, float],
-    radiation_series: dict[datetime, float],
-    wind_series: dict[datetime, float],
-) -> dict[datetime, float]:
-    """Modelo derivado y aproximado de horas de humectación foliar.
-
-    Documentado explícitamente como aproximación (ver docstring del módulo):
-    sube con RH alta o lluvia, decae con radiación y viento. No es una
-    medición real de ningún sensor.
-    """
-    hours = sorted(rh_series.keys())
-    wetness: dict[datetime, float] = {}
-    state = 0.0
-    for hour in hours:
-        rh = rh_series.get(hour, 0.0) or 0.0
-        precip = precip_series.get(hour, 0.0) or 0.0
-        if rh >= WETNESS_RH_THRESHOLD or precip > 0:
-            state = min(1.0, state + WETNESS_WETTING_RATE)
-        else:
-            radiation = radiation_series.get(hour, 0.0) or 0.0
-            wind = wind_series.get(hour, 0.0) or 0.0
-            drying_rate = (
-                WETNESS_BASE_DRYING_RATE
-                + WETNESS_RADIATION_DRYING_FACTOR * min(radiation / WETNESS_RADIATION_REF_WM2, 1.0)
-                + WETNESS_WIND_DRYING_FACTOR * min(wind / WETNESS_WIND_REF_KMH, 1.0)
-            )
-            state = max(0.0, state - drying_rate)
-        wetness[hour] = state
-    return wetness
 
 
 def _simulate_rain_pulses(
@@ -195,7 +154,7 @@ async def simulate_sensor_readings(
             "Ejecuta antes POST /v1/parcels/{id}/backfill para este periodo."
         )
 
-    wetness_hourly = _compute_hourly_wetness(
+    wetness_hourly = compute_hourly_wetness(
         rh_series=era5_series.get("relative_humidity_2m", {}),
         precip_series=era5_series.get("precipitation", {}),
         radiation_series=era5_series.get("shortwave_radiation", {}),

@@ -27,7 +27,8 @@ producto fitosanitario en cualquier texto de respuesta.
 
 | Dato | Estado | Detalle |
 |---|---|---|
-| Histórico climático diario/horario (25 años) | **REAL** | Open-Meteo Historical Weather API, modelo ERA5-Land, CC BY 4.0, sin API key, resolución ~9 km, desde 1950. |
+| Histórico climático diario/horario | **REAL** | Open-Meteo Historical Weather API, modelo ERA5-Land, CC BY 4.0, sin API key, resolución ~9 km, desde 1950. Se importan automáticamente los últimos 5 años al dar de alta la parcela; hasta 25 años bajo demanda. |
+| Previsión de los próximos 7 días | **REAL** | Open-Meteo Forecast API, sin API key. Se reemplaza por completo cada vez que se refresca (no se acumula como el histórico). Usada por el motor de recomendaciones para días futuros. |
 | Altitud de la parcela | **REAL** | API de elevación de Open-Meteo, resuelta en el alta de la parcela (nunca hardcodeada). |
 | Lecturas de sensor de parcela (temperatura, precipitación, humectación foliar) a resolución de 15 min | **100% SIMULADO** | No hay hardware instalado. Ver [módulo 3](#módulo-3--simulador-de-sensores). Etiquetado como tal en BD (`source.is_simulated`, `data_provider.type='simulated_sensor'`), en la API (`is_simulated: true`) y en la interfaz (badge naranja "SIMULADO"). |
 | Redes de estaciones regionales (AEMET, SIAR, RIA/RAIF) | **NO IMPLEMENTADO** | Catalogadas en `data_provider` con `has_adapter=false` para que la arquitectura las soporte sin migrar nada, pero no aportan ningún dato en este MVP. |
@@ -136,16 +137,22 @@ docker compose up --build -d
    las coordenadas de la finca de referencia precargadas. Debe aparecer
    `Open-Meteo Historical Weather API (ERA5-Land)` con rol `primary`, y un
    aviso de que no hay ninguna red regional implementada.
-2. Crea la parcela (código, nombre, variedad opcional) y entra en su panel.
-3. Pulsa **"Importar histórico de 25 años"**: descarga real de Open-Meteo y
-   dibuja la gráfica de temperatura/precipitación diaria.
+2. Crea la parcela (código, nombre, variedad opcional): al crearla se
+   importan automáticamente los últimos 5 años de histórico real, y lo
+   verás confirmado en un aviso al entrar en su panel.
+3. Usa el filtro de histórico (rango de fechas + variables) y comprueba
+   que la tabla paginada muestra los datos filtrados; pulsa "Importar
+   histórico completo (25 años)" si quieres profundizar más atrás.
 4. Pulsa **"Simular sensores del último mes"**: genera lecturas sintéticas
    cada 15 minutos, claramente etiquetadas como `SIMULADO`, con el sesgo de
-   ese sensor mostrado en pantalla.
-5. Asigna la variedad **Hojiblanca** y mira el nivel de riesgo de repilo del
+   ese sensor mostrado en pantalla; fíltralas igual que el histórico.
+5. Pulsa **"Traer previsión (7 días)"** y comprueba la tabla de previsión
+   real. Elige un día futuro en el selector de recomendaciones: la
+   respuesta debe indicar `data_basis: prevision`.
+6. Asigna la variedad **Hojiblanca** y mira el nivel de riesgo de repilo del
    día evaluado; cámbiala a **Frantoio** (más resistente en la ficha
    varietal) y comprueba que el nivel de atención baja para el mismo día.
-6. Ve a "Importar tratamientos desde Excel", sube un fichero con al menos
+7. Ve a "Importar tratamientos desde Excel", sube un fichero con al menos
    una fila con fecha inválida: la previsualización debe reportar el error
    por número de fila sin bloquear la importación del resto, y solo se
    escribe en base de datos al confirmar.
@@ -190,12 +197,26 @@ Se marca `needs_review=true` (no se activa automáticamente) si el desnivel
 supera 150 m o la distancia horizontal 25 km, y se declara explícitamente
 que el sistema no evalúa barreras orográficas intermedias.
 
-Único adaptador real implementado: **Open-Meteo / ERA5-Land**
-(`app/services/openmeteo_client.py`), con llamadas HTTP reales, troceadas en
-bloques de 5 años, guardadas siempre en UTC, con conversión de humedad de
-suelo de fracción a porcentaje. AEMET/SIAR/RIA están catalogados con
-`has_adapter=false`: la arquitectura los soporta sin refactorizar nada el
-día que se añadan.
+Adaptadores reales implementados en `app/services/openmeteo_client.py`:
+
+- **Open-Meteo / ERA5-Land** (histórico): llamadas HTTP reales, troceadas en
+  bloques de 5 años, guardadas siempre en UTC, con conversión de humedad de
+  suelo de fracción a porcentaje. Al dar de alta una parcela se importan
+  automáticamente los últimos `initial_backfill_years_back` años (5 por
+  defecto). Dos formas de traer más histórico después:
+  `POST /v1/parcels/{id}/backfill/sync` (solo lo que falta desde el último
+  dato guardado hasta hoy — idempotente, rápido) y
+  `POST /v1/parcels/{id}/backfill?years_back=N` (vuelve a pedir N años
+  completos, para profundizar el histórico).
+- **Open-Meteo Forecast API** (previsión, `POST /v1/parcels/{id}/fetch-forecast`):
+  trae los próximos `forecast_days_ahead` días (7 por defecto). A diferencia
+  del histórico, sus observaciones se **reemplazan por completo** en cada
+  refresco (`data_provider.type='forecast'`, prioridad peor que ERA5-Land
+  para que un histórico ya confirmado nunca sea sobrescrito por una
+  previsión en el raro caso de solape de un día).
+
+AEMET/SIAR/RIA están catalogados con `has_adapter=false`: la arquitectura
+los soporta sin refactorizar nada el día que se añadan.
 
 ### Módulo 3 — Simulador de sensores
 
@@ -243,6 +264,18 @@ se ha encontrado una fórmula agronómica simple y fiable para ellas sin
 inventar umbrales, y se declara así en la respuesta de recomendaciones en
 vez de aparentar una cobertura que no existe.
 
+**Recomendaciones para días futuros (previsión):** `GET .../recommendations?day=`
+detecta si `day` cae dentro del histórico ERA5-Land ya descargado o más
+allá (futuro): en el primer caso usa el histórico real como siempre; en el
+segundo, usa la previsión de `POST /v1/parcels/{id}/fetch-forecast` para
+GDD, helada y balance hídrico, y **deriva la humectación foliar en memoria**
+a partir de la previsión (mismo modelo que el simulador, sin guardar nada)
+para poder evaluar repilo también en días futuros. La respuesta incluye
+siempre `data_basis: "historico_era5" | "prevision"` para que quede
+explícito de dónde sale cada recomendación. Limitación conocida y
+declarada: el repilo de un día de previsión no tiene en cuenta la
+humectación de los días anteriores al inicio de la previsión.
+
 ### Módulo 5 — Importador de tratamientos desde Excel
 
 Se adapta al fichero del agricultor, no al revés: detecta la fila de
@@ -266,15 +299,17 @@ que el frontend del módulo 7 funcionara — están marcados en el código):
 ```
 POST /v1/discovery/point
 GET  /v1/parcels
-POST /v1/parcels
+POST /v1/parcels                        (importa automáticamente 5 años de histórico)
 GET  /v1/parcels/{id}
 PATCH /v1/parcels/{id}/variety
 POST /v1/parcels/{id}/resolve-sources?dry_run=
-POST /v1/parcels/{id}/backfill
+POST /v1/parcels/{id}/backfill          (años explícitos, por defecto 25)
+POST /v1/parcels/{id}/backfill/sync     (solo lo que falta hasta hoy)
+POST /v1/parcels/{id}/fetch-forecast    (previsión real, próximos 7 días)
 POST /v1/parcels/{id}/simulate-sensors
 GET  /v1/parcels/{id}/daily
-GET  /v1/parcels/{id}/observations      (detalle horario/15-min, para las gráficas)
-GET  /v1/parcels/{id}/recommendations
+GET  /v1/parcels/{id}/observations      (detalle horario/15-min, para gráficas y tablas)
+GET  /v1/parcels/{id}/recommendations   (histórico o previsión según el día pedido)
 GET  /v1/varieties, GET /v1/varieties/{code}
 POST /v1/imports/treatments/preview
 POST /v1/imports/treatments/commit
@@ -284,11 +319,22 @@ GET  /v1/health
 ### Módulo 7 — Frontend
 
 Ver la sección [Stack](#stack) para la justificación de HTMX + Jinja2 +
-JS/Chart.js. Pantallas: alta de parcela + descubrimiento de fuentes,
-importación de histórico con gráfica, simulación de sensores con gráfica de
-detalle y etiqueta SIMULADO, selector de variedad + panel de
-recomendaciones, e importación de tratamientos con previsualización de
-errores.
+JS/Chart.js. Pantallas: alta de parcela + descubrimiento de fuentes
+(al crear la parcela se muestra una notificación de una sola vez con el
+resultado del import automático de 5 años); panel de la parcela con:
+
+- **Histórico**: gráfica + botones "Importar lo que falta hasta hoy" (sync
+  incremental) e "Importar histórico completo (25 años)", más un filtro
+  (rango de fechas + variables a mostrar) con **tabla paginada** de los
+  datos filtrados.
+- **Sensores SIMULADO**: gráfica de detalle 15-min + el mismo patrón de
+  filtro y tabla paginada sobre las lecturas simuladas.
+- **Previsión**: botón para traer los próximos 7 días reales de Open-Meteo
+  y tabla con el resultado.
+- **Recomendaciones**: selector de variedad, selector de día (puede ser
+  futuro, dentro de la previsión) y panel con una etiqueta explícita de si
+  la recomendación se basa en histórico real o en previsión.
+- Importación de tratamientos con previsualización de errores por fila.
 
 ## Tests
 
@@ -311,6 +357,12 @@ Cubren, como mínimo lo pedido:
   sugerida ni el disclaimer contienen nombres de materias activas o dosis
   con unidades de producto fitosanitario (la frontera de negocio del
   módulo 4).
+- `test_provider_catalog.py`: la previsión nunca puede tener mejor
+  prioridad que el histórico real en la vista combinada de `/daily`
+  (regresión del bug corregido durante el desarrollo).
+- `test_seed_upsert.py`: si se corrige un valor de catálogo en el código
+  (proveedores, variables, variedades…), el siguiente arranque de la API
+  lo repara en la base de datos aunque ya existiera con el valor antiguo.
 
 ## Qué falta para el sistema completo
 

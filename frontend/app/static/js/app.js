@@ -19,6 +19,10 @@ async function getJson(url) {
   return data;
 }
 
+function checkedValues(containerId) {
+  return Array.from(document.querySelectorAll(`#${containerId} input:checked`)).map((el) => el.value);
+}
+
 async function updateVariety(parcelId, varietyCode) {
   await fetch(`/ui/parcel/${parcelId}/variety`, {
     method: "POST",
@@ -28,7 +32,25 @@ async function updateVariety(parcelId, varietyCode) {
   loadRecommendations(parcelId);
 }
 
-async function runBackfill(parcelId) {
+// ---------------------------------------------------------------------
+// Histórico REAL (ERA5-Land)
+// ---------------------------------------------------------------------
+
+async function runSync(parcelId) {
+  const status = document.getElementById("backfill-status");
+  status.textContent = "Importando lo que falte desde el último dato guardado hasta hoy…";
+  try {
+    const result = await postJson(`/ui/parcel/${parcelId}/backfill/sync`, {});
+    status.textContent = result.already_up_to_date
+      ? "Ya estaba al día, no había nada nuevo que importar."
+      : `Listo: ${result.rows_fetched} lecturas nuevas (${result.start_date} → ${result.end_date}).`;
+    await drawHistoryChart(parcelId);
+  } catch (e) {
+    status.textContent = "Error: " + e.message;
+  }
+}
+
+async function runFullBackfill(parcelId) {
   const status = document.getElementById("backfill-status");
   status.textContent = "Descargando 25 años de histórico real de Open-Meteo/ERA5-Land… puede tardar un minuto.";
   try {
@@ -90,6 +112,33 @@ async function drawHistoryChart(parcelId) {
   });
 }
 
+async function applyHistoryFilter(parcelId) {
+  const start = document.getElementById("hist-start").value;
+  const end = document.getElementById("hist-end").value;
+  const variables = checkedValues("hist-variables");
+  const container = document.getElementById("history-table");
+  if (!start || !end) { container.innerHTML = '<p class="error-text">Elige fecha de inicio y fin.</p>'; return; }
+  if (!variables.length) { container.innerHTML = '<p class="error-text">Marca al menos una variable.</p>'; return; }
+
+  container.innerHTML = "<p class='small'>Consultando…</p>";
+  try {
+    const params = new URLSearchParams({ start, end, variables: variables.join(",") });
+    const data = await getJson(`/ui/parcel/${parcelId}/daily.json?${params.toString()}`);
+    const items = [];
+    for (const [code, points] of Object.entries(data.variables)) {
+      for (const p of points) items.push({ key: p.day, variable: code, value: p.value });
+    }
+    const { columns, rows } = pivot(items, variables);
+    renderTable("history-table", "Día", columns, rows);
+  } catch (e) {
+    container.innerHTML = `<p class="error-text">${e.message}</p>`;
+  }
+}
+
+// ---------------------------------------------------------------------
+// Sensores SIMULADOS (módulo 3)
+// ---------------------------------------------------------------------
+
 async function runSimulate(parcelId) {
   const status = document.getElementById("simulate-status");
   status.textContent = "Generando lecturas SIMULADAS del último mes (cada 15 min)…";
@@ -99,10 +148,18 @@ async function runSimulate(parcelId) {
       `SIMULADO: ${result.readings_written} lecturas cada ${result.interval_minutes} min. ` +
       `Sesgo de este sensor: ${result.sensor_offset_c} °C respecto a la malla ERA5-Land.`;
     await drawSimulatedChart(parcelId, result.start, result.end);
+
+    document.getElementById("sim-start").value = toDatetimeLocal(result.start);
+    document.getElementById("sim-end").value = toDatetimeLocal(result.end);
+
     loadRecommendations(parcelId);
   } catch (e) {
     status.textContent = "Error: " + e.message;
   }
+}
+
+function toDatetimeLocal(isoString) {
+  return isoString.slice(0, 16);
 }
 
 async function drawSimulatedChart(parcelId, start, end) {
@@ -165,6 +222,138 @@ async function drawSimulatedChart(parcelId, start, end) {
   });
 }
 
+async function applySimulatedFilter(parcelId) {
+  const startLocal = document.getElementById("sim-start").value;
+  const endLocal = document.getElementById("sim-end").value;
+  const variables = checkedValues("sim-variables");
+  const container = document.getElementById("simulated-table");
+  if (!startLocal || !endLocal) {
+    container.innerHTML = '<p class="error-text">Elige fecha/hora de inicio y fin (simula sensores primero si no hay rango disponible).</p>';
+    return;
+  }
+  if (!variables.length) { container.innerHTML = '<p class="error-text">Marca al menos una variable.</p>'; return; }
+
+  container.innerHTML = "<p class='small'>Consultando…</p>";
+  try {
+    const params = new URLSearchParams({
+      provider: "sim_sensor_v1",
+      start: new Date(startLocal).toISOString(),
+      end: new Date(endLocal).toISOString(),
+      variables: variables.join(","),
+    });
+    const data = await getJson(`/ui/parcel/${parcelId}/observations.json?${params.toString()}`);
+    const items = data.points.map((p) => ({ key: p.timestamp, variable: p.variable, value: p.value }));
+    const { columns, rows } = pivot(items, variables);
+    renderTable("simulated-table", "Instante (UTC)", columns, rows);
+  } catch (e) {
+    container.innerHTML = `<p class="error-text">${e.message}</p>`;
+  }
+}
+
+// ---------------------------------------------------------------------
+// Previsión (Open-Meteo Forecast API)
+// ---------------------------------------------------------------------
+
+async function runFetchForecast(parcelId) {
+  const status = document.getElementById("forecast-status");
+  status.textContent = "Descargando previsión real de Open-Meteo…";
+  try {
+    const result = await postJson(`/ui/parcel/${parcelId}/fetch-forecast`, {});
+    status.textContent = `Previsión actualizada: ${result.rows_written} lecturas horarias (${result.days_ahead} días).`;
+
+    const params = new URLSearchParams({
+      provider: "open_meteo_forecast",
+      start: result.start,
+      end: result.end,
+      variables: "temperature_2m,relative_humidity_2m,precipitation,wind_speed_10m",
+    });
+    const data = await getJson(`/ui/parcel/${parcelId}/observations.json?${params.toString()}`);
+    const items = data.points.map((p) => ({ key: p.timestamp, variable: p.variable, value: p.value }));
+    const { columns, rows } = pivot(items, ["temperature_2m", "relative_humidity_2m", "precipitation", "wind_speed_10m"]);
+    renderTable("forecast-table", "Instante (UTC)", columns, rows);
+
+    loadRecommendations(parcelId);
+  } catch (e) {
+    status.textContent = "Error: " + e.message;
+  }
+}
+
+// ---------------------------------------------------------------------
+// Tabla genérica con filtro (pivota una lista de {key, variable, value} en
+// filas por `key` con una columna por variable) y paginación en cliente.
+// ---------------------------------------------------------------------
+
+function pivot(items, columns) {
+  const rowsMap = new Map();
+  for (const it of items) {
+    if (!rowsMap.has(it.key)) rowsMap.set(it.key, { _key: it.key });
+    rowsMap.get(it.key)[it.variable] = it.value;
+  }
+  const rows = Array.from(rowsMap.values()).sort((a, b) => (a._key < b._key ? -1 : a._key > b._key ? 1 : 0));
+  return { columns, rows };
+}
+
+const VARIABLE_LABELS = {
+  temperature_2m: "Temperatura (°C)",
+  precipitation: "Precipitación (mm)",
+  relative_humidity_2m: "Humedad relativa (%)",
+  wind_speed_10m: "Viento (km/h)",
+  shortwave_radiation: "Radiación (W/m²)",
+  soil_moisture_7_28cm: "Humedad suelo (%)",
+  et0_fao_evapotranspiration: "ET0 (mm)",
+  leaf_wetness: "Humectación foliar (0-1)",
+};
+
+const tableState = {};
+const PAGE_SIZE = 40;
+
+function renderTable(containerId, keyLabel, columns, rows) {
+  tableState[containerId] = { keyLabel, columns, rows, page: 0 };
+  renderTablePage(containerId);
+}
+
+function renderTablePage(containerId) {
+  const state = tableState[containerId];
+  const totalPages = Math.max(1, Math.ceil(state.rows.length / PAGE_SIZE));
+  state.page = Math.min(state.page, totalPages - 1);
+  const start = state.page * PAGE_SIZE;
+  const pageRows = state.rows.slice(start, start + PAGE_SIZE);
+
+  let html = "<table><thead><tr>";
+  html += `<th>${state.keyLabel}</th>`;
+  for (const c of state.columns) html += `<th>${VARIABLE_LABELS[c] || c}</th>`;
+  html += "</tr></thead><tbody>";
+  if (!pageRows.length) {
+    html += `<tr><td colspan="${state.columns.length + 1}" class="small">Sin datos en el rango filtrado.</td></tr>`;
+  }
+  for (const r of pageRows) {
+    html += `<tr><td>${r._key}</td>`;
+    for (const c of state.columns) {
+      const v = r[c];
+      html += `<td>${v === undefined ? "—" : (typeof v === "number" ? v.toFixed(2) : v)}</td>`;
+    }
+    html += "</tr>";
+  }
+  html += "</tbody></table>";
+  html += `<div class="table-pager small">
+      Página ${state.page + 1} de ${totalPages} (${state.rows.length} filas)
+      <button class="secondary" onclick="tablePage('${containerId}', -1)">« Anterior</button>
+      <button class="secondary" onclick="tablePage('${containerId}', 1)">Siguiente »</button>
+    </div>`;
+
+  document.getElementById(containerId).innerHTML = html;
+}
+
+function tablePage(containerId, delta) {
+  const state = tableState[containerId];
+  state.page += delta;
+  renderTablePage(containerId);
+}
+
+// ---------------------------------------------------------------------
+// Recomendaciones
+// ---------------------------------------------------------------------
+
 async function loadRecommendations(parcelId) {
   const panel = document.getElementById("recommendations-panel");
   const dayInput = document.getElementById("rec-day");
@@ -180,6 +369,11 @@ async function loadRecommendations(parcelId) {
 
 function renderRecommendations(data) {
   let html = "";
+  const basisTag = data.data_basis === "prevision"
+    ? '<span class="tag real">Basado en PREVISIÓN</span>'
+    : '<span class="tag role-primary">Basado en histórico real</span>';
+  html += `<p>${basisTag}</p>`;
+
   if (data.warnings && data.warnings.length) {
     html += `<ul>${data.warnings.map((w) => `<li class="small">${w}</li>`).join("")}</ul>`;
   }
@@ -205,4 +399,20 @@ function renderRecommendations(data) {
   }
   html += `<p class="small"><em>${data.disclaimer}</em></p>`;
   return html;
+}
+
+// ---------------------------------------------------------------------
+// Valores por defecto de los filtros al cargar la página
+// ---------------------------------------------------------------------
+
+function setDefaultFilterDates() {
+  const histStart = document.getElementById("hist-start");
+  const histEnd = document.getElementById("hist-end");
+  if (histStart && histEnd) {
+    const end = new Date();
+    const start = new Date();
+    start.setDate(start.getDate() - 90);
+    histStart.value = start.toISOString().slice(0, 10);
+    histEnd.value = end.toISOString().slice(0, 10);
+  }
 }

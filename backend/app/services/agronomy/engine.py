@@ -18,7 +18,7 @@ así en la respuesta, no se aparenta cobertura que no existe.
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.catalog import Variable
@@ -29,6 +29,7 @@ from app.services.agronomy import frost as frost_mod
 from app.services.agronomy import gdd as gdd_mod
 from app.services.agronomy import repilo as repilo_mod
 from app.services.agronomy import water_balance as wb_mod
+from app.services.agronomy.leaf_wetness_model import compute_hourly_wetness
 from app.services.agronomy.safety_guard import assert_no_phytosanitary_content
 from app.services.agronomy.varietal_modulation import modulate_risk
 
@@ -75,6 +76,7 @@ DAILY_SUM_SQL = text(
 class RecommendationsResult:
     day: date
     variety_code: str | None
+    data_basis: str  # "historico_era5" | "prevision"
     threats: list[dict]
     water_balance: dict | None
     not_dynamically_modeled_threats: list[str]
@@ -111,10 +113,69 @@ def _utc(d: date) -> datetime:
     return datetime.combine(d, datetime.min.time(), tzinfo=timezone.utc)
 
 
+async def _last_era5_date(session: AsyncSession, era5_source: Source, temperature_variable_id: int) -> date | None:
+    ts = (
+        await session.execute(
+            select(func.max(Observation.timestamp)).where(
+                Observation.source_id == era5_source.id,
+                Observation.variable_id == temperature_variable_id,
+            )
+        )
+    ).scalar_one_or_none()
+    return ts.date() if ts else None
+
+
+async def _daily_minmax_rows(session: AsyncSession, source_id: int, variable_id: int, start: date, end: date):
+    if start > end:
+        return []
+    return (
+        await session.execute(
+            DAILY_MINMAX_SQL,
+            {"source_id": source_id, "variable_id": variable_id, "start": _utc(start), "end": _utc(end + timedelta(days=1))},
+        )
+    ).all()
+
+
+async def _daily_sum_rows(session: AsyncSession, source_id: int, variable_id: int, start: date, end: date):
+    if start > end:
+        return []
+    return (
+        await session.execute(
+            DAILY_SUM_SQL,
+            {"source_id": source_id, "variable_id": variable_id, "start": _utc(start), "end": _utc(end + timedelta(days=1))},
+        )
+    ).all()
+
+
+async def _combined_daily(
+    fetch_fn,
+    session: AsyncSession,
+    era5_source: Source,
+    forecast_source: Source | None,
+    last_era5_date: date | None,
+    variable_id: int,
+    start: date,
+    end: date,
+):
+    """Combina histórico ERA5-Land (hasta `last_era5_date`) con previsión (a
+    partir de ahí) para un rango [start, end], usando `fetch_fn` (agregación
+    diaria min/max o sum) sobre cada tramo. Si el rango cae por completo en
+    uno de los dos, el otro tramo simplemente no aporta filas.
+    """
+    rows = list(await fetch_fn(session, era5_source.id, variable_id, start, min(end, last_era5_date) if last_era5_date else start - timedelta(days=1)))
+
+    forecast_start = (last_era5_date + timedelta(days=1)) if last_era5_date else start
+    if forecast_source is not None:
+        rows += list(await fetch_fn(session, forecast_source.id, variable_id, max(start, forecast_start), end))
+
+    return sorted(rows, key=lambda r: r.day)
+
+
 async def build_recommendations(session: AsyncSession, parcel: Parcel, day: date) -> RecommendationsResult:
     var_ids = await get_variable_ids(session)
     era5_source = await _get_source(session, f"era5_land:parcel:{parcel.id}")
     sim_source = await _get_source(session, f"sim_sensor_v1:parcel:{parcel.id}")
+    forecast_source = await _get_source(session, f"open_meteo_forecast:parcel:{parcel.id}")
 
     if era5_source is None:
         raise MissingDataError(
@@ -122,25 +183,30 @@ async def build_recommendations(session: AsyncSession, parcel: Parcel, day: date
             "POST /v1/parcels/{id}/backfill."
         )
 
+    last_era5_date = await _last_era5_date(session, era5_source, var_ids["temperature_2m"])
+    using_forecast_for_day = last_era5_date is None or day > last_era5_date
+    data_basis = "prevision" if using_forecast_for_day else "historico_era5"
+
     susceptibility_map = await _susceptibility_map(session, parcel.variety_id)
     variety_code = parcel.variety.code if parcel.variety else None
 
     warnings: list[str] = []
     threats_out: list[dict] = []
 
-    # --- Prays oleae: GDD acumulado desde el 1 de enero del año de `day` ---
-    year_start = date(day.year, 1, 1)
-    minmax_rows = (
-        await session.execute(
-            DAILY_MINMAX_SQL,
-            {
-                "source_id": era5_source.id,
-                "variable_id": var_ids["temperature_2m"],
-                "start": _utc(year_start),
-                "end": _utc(day + timedelta(days=1)),
-            },
+    if using_forecast_for_day and forecast_source is None:
+        warnings.append(
+            "El día solicitado cae fuera del histórico ERA5-Land y todavía no se ha "
+            "descargado ninguna previsión: ejecuta antes POST /v1/parcels/{id}/fetch-forecast "
+            "para poder evaluar días futuros."
         )
-    ).all()
+
+    # --- Prays oleae: GDD acumulado desde el 1 de enero del año de `day`, ---
+    # combinando histórico ERA5-Land con previsión si `day` cae en el futuro.
+    year_start = date(day.year, 1, 1)
+    minmax_rows = await _combined_daily(
+        _daily_minmax_rows, session, era5_source, forecast_source, last_era5_date,
+        var_ids["temperature_2m"], year_start, day,
+    )
 
     if minmax_rows:
         cumulative_gdd = gdd_mod.accumulate_gdd([(row.t_min, row.t_max) for row in minmax_rows])
@@ -169,20 +235,13 @@ async def build_recommendations(session: AsyncSession, parcel: Parcel, day: date
     else:
         warnings.append("Sin histórico ERA5-Land suficiente para calcular grados-día de Prays oleae.")
 
-    # --- Helada: temperatura mínima real del día `day` ---
+    # --- Helada: temperatura mínima del día `day` (histórica o de previsión) ---
     day_row = next((row for row in minmax_rows if row.day == day), None)
     if day_row is None:
-        single_day_rows = (
-            await session.execute(
-                DAILY_MINMAX_SQL,
-                {
-                    "source_id": era5_source.id,
-                    "variable_id": var_ids["temperature_2m"],
-                    "start": _utc(day),
-                    "end": _utc(day + timedelta(days=1)),
-                },
-            )
-        ).all()
+        single_day_rows = await _combined_daily(
+            _daily_minmax_rows, session, era5_source, forecast_source, last_era5_date,
+            var_ids["temperature_2m"], day, day,
+        )
         day_row = single_day_rows[0] if single_day_rows else None
 
     if day_row is not None:
@@ -210,48 +269,130 @@ async def build_recommendations(session: AsyncSession, parcel: Parcel, day: date
             }
         )
     else:
-        warnings.append("Sin histórico ERA5-Land para el día solicitado: no se puede evaluar riesgo de helada.")
+        warnings.append("Sin dato de temperatura (histórico ni previsión) para el día solicitado: no se puede evaluar riesgo de helada.")
 
-    # --- Repilo: requiere humectación foliar SIMULADA (módulo 3) ---
-    if sim_source is None:
-        warnings.append(
-            "Sin lecturas de sensor simulado para esta parcela: no se puede evaluar riesgo "
-            "de repilo (depende de humectación foliar, que ninguna fuente real cubre). "
-            "Ejecuta antes POST /v1/parcels/{id}/simulate-sensors."
-        )
-    else:
-        window_start = _utc(day - timedelta(days=4))
+    # --- Repilo: requiere humectación foliar. Para días dentro del histórico
+    # se usa la del sensor SIMULADO (módulo 3); para días futuros se deriva
+    # en memoria a partir de la previsión, con el mismo modelo (ver
+    # leaf_wetness_model.py), sin guardar nada.
+    if not using_forecast_for_day:
+        if sim_source is None:
+            warnings.append(
+                "Sin lecturas de sensor simulado para esta parcela: no se puede evaluar riesgo "
+                "de repilo (depende de humectación foliar, que ninguna fuente real cubre). "
+                "Ejecuta antes POST /v1/parcels/{id}/simulate-sensors."
+            )
+        else:
+            window_start = _utc(day - timedelta(days=4))
+            window_end = _utc(day + timedelta(days=1))
+            rows = (
+                await session.execute(
+                    select(Observation.timestamp, Observation.variable_id, Observation.value)
+                    .where(Observation.source_id == sim_source.id)
+                    .where(Observation.variable_id.in_([var_ids["leaf_wetness"], var_ids["temperature_2m"]]))
+                    .where(Observation.timestamp >= window_start)
+                    .where(Observation.timestamp < window_end)
+                    .order_by(Observation.timestamp)
+                )
+            ).all()
+
+            wetness_by_ts: dict = {}
+            temp_by_ts: dict = {}
+            for ts, vid, value in rows:
+                if vid == var_ids["leaf_wetness"]:
+                    wetness_by_ts[ts] = value
+                else:
+                    temp_by_ts[ts] = value
+
+            timestamps = sorted(set(wetness_by_ts) & set(temp_by_ts))
+            if len(timestamps) < 2:
+                warnings.append(
+                    "No hay suficientes lecturas de sensor simulado en los días previos para "
+                    "evaluar repilo."
+                )
+            else:
+                samples = []
+                for i, ts in enumerate(timestamps):
+                    step_hours = 0.25 if i == 0 else (ts - timestamps[i - 1]).total_seconds() / 3600.0
+                    samples.append((step_hours, wetness_by_ts[ts], temp_by_ts[ts]))
+
+                longest_hours, mean_temp = repilo_mod.find_longest_wet_spell(samples)
+                assessment = repilo_mod.assess_repilo_risk(longest_hours, mean_temp)
+                repilo_raw_pressure = min(1.0, assessment.pressure_ratio * 0.5)
+                level, evidence = susceptibility_map.get("repilo", (None, None))
+                result = modulate_risk("repilo", repilo_raw_pressure, variety_code, level, evidence)
+                assert_no_phytosanitary_content(result.explanation, result.suggested_action)
+                threats_out.append(
+                    {
+                        "threat_code": "repilo",
+                        "attention_level": result.attention_level,
+                        "suggested_action": result.suggested_action,
+                        "explanation": result.explanation,
+                        "evidence_level": result.evidence_level,
+                        "evidence_downgrade_applied": result.evidence_downgrade_applied,
+                        "model_detail": {
+                            "longest_continuous_wetness_hours": round(longest_hours, 1),
+                            "mean_temp_during_wetness_c": round(mean_temp, 1),
+                            "required_hours_for_infection": (
+                                None if assessment.required_hours == float("inf") else round(assessment.required_hours, 1)
+                            ),
+                            "infection_triggered": assessment.infection_triggered,
+                            "data_basis": "humectación foliar SIMULADA (módulo 3), no medición real",
+                        },
+                    }
+                )
+    elif forecast_source is not None:
+        window_start = _utc((last_era5_date + timedelta(days=1)) if last_era5_date else day)
         window_end = _utc(day + timedelta(days=1))
+        variable_codes_needed = {
+            "leaf_wetness_inputs": [
+                var_ids["relative_humidity_2m"],
+                var_ids["precipitation"],
+                var_ids["shortwave_radiation"],
+                var_ids["wind_speed_10m"],
+            ],
+            "temperature": var_ids["temperature_2m"],
+        }
         rows = (
             await session.execute(
                 select(Observation.timestamp, Observation.variable_id, Observation.value)
-                .where(Observation.source_id == sim_source.id)
-                .where(Observation.variable_id.in_([var_ids["leaf_wetness"], var_ids["temperature_2m"]]))
+                .where(Observation.source_id == forecast_source.id)
+                .where(
+                    Observation.variable_id.in_(
+                        variable_codes_needed["leaf_wetness_inputs"] + [variable_codes_needed["temperature"]]
+                    )
+                )
                 .where(Observation.timestamp >= window_start)
                 .where(Observation.timestamp < window_end)
                 .order_by(Observation.timestamp)
             )
         ).all()
 
-        wetness_by_ts: dict = {}
-        temp_by_ts: dict = {}
+        rh_by_ts, precip_by_ts, rad_by_ts, wind_by_ts, temp_by_ts = {}, {}, {}, {}, {}
         for ts, vid, value in rows:
-            if vid == var_ids["leaf_wetness"]:
-                wetness_by_ts[ts] = value
-            else:
+            if vid == var_ids["relative_humidity_2m"]:
+                rh_by_ts[ts] = value
+            elif vid == var_ids["precipitation"]:
+                precip_by_ts[ts] = value
+            elif vid == var_ids["shortwave_radiation"]:
+                rad_by_ts[ts] = value
+            elif vid == var_ids["wind_speed_10m"]:
+                wind_by_ts[ts] = value
+            elif vid == var_ids["temperature_2m"]:
                 temp_by_ts[ts] = value
 
-        timestamps = sorted(set(wetness_by_ts) & set(temp_by_ts))
-        if len(timestamps) < 2:
+        if len(rh_by_ts) < 2 or len(temp_by_ts) < 2:
             warnings.append(
-                "No hay suficientes lecturas de sensor simulado en los días previos para "
-                "evaluar repilo."
+                "No hay suficiente previsión descargada en el rango necesario para evaluar "
+                "repilo de este día futuro."
             )
         else:
+            wetness_hourly = compute_hourly_wetness(rh_by_ts, precip_by_ts, rad_by_ts, wind_by_ts)
+            timestamps = sorted(set(wetness_hourly) & set(temp_by_ts))
             samples = []
             for i, ts in enumerate(timestamps):
-                step_hours = 0.25 if i == 0 else (ts - timestamps[i - 1]).total_seconds() / 3600.0
-                samples.append((step_hours, wetness_by_ts[ts], temp_by_ts[ts]))
+                step_hours = 1.0 if i == 0 else (ts - timestamps[i - 1]).total_seconds() / 3600.0
+                samples.append((step_hours, wetness_hourly[ts], temp_by_ts[ts]))
 
             longest_hours, mean_temp = repilo_mod.find_longest_wet_spell(samples)
             assessment = repilo_mod.assess_repilo_risk(longest_hours, mean_temp)
@@ -274,35 +415,25 @@ async def build_recommendations(session: AsyncSession, parcel: Parcel, day: date
                             None if assessment.required_hours == float("inf") else round(assessment.required_hours, 1)
                         ),
                         "infection_triggered": assessment.infection_triggered,
-                        "data_basis": "humectación foliar SIMULADA (módulo 3), no medición real",
+                        "data_basis": (
+                            "humectación foliar derivada de la previsión Open-Meteo (no medición real); "
+                            "no se ha tenido en cuenta la humectación de los días anteriores al inicio "
+                            "de la previsión (limitación conocida)"
+                        ),
                     },
                 }
             )
 
     # --- Balance hídrico (no es una amenaza catalogada: indicador general) ---
     water_balance_out = None
-    precip_rows = (
-        await session.execute(
-            DAILY_SUM_SQL,
-            {
-                "source_id": era5_source.id,
-                "variable_id": var_ids["precipitation"],
-                "start": _utc(day - timedelta(days=WATER_BALANCE_LOOKBACK_DAYS)),
-                "end": _utc(day + timedelta(days=1)),
-            },
-        )
-    ).all()
-    et0_rows = (
-        await session.execute(
-            DAILY_SUM_SQL,
-            {
-                "source_id": era5_source.id,
-                "variable_id": var_ids["et0_fao_evapotranspiration"],
-                "start": _utc(day - timedelta(days=WATER_BALANCE_LOOKBACK_DAYS)),
-                "end": _utc(day + timedelta(days=1)),
-            },
-        )
-    ).all()
+    precip_rows = await _combined_daily(
+        _daily_sum_rows, session, era5_source, forecast_source, last_era5_date,
+        var_ids["precipitation"], day - timedelta(days=WATER_BALANCE_LOOKBACK_DAYS), day,
+    )
+    et0_rows = await _combined_daily(
+        _daily_sum_rows, session, era5_source, forecast_source, last_era5_date,
+        var_ids["et0_fao_evapotranspiration"], day - timedelta(days=WATER_BALANCE_LOOKBACK_DAYS), day,
+    )
     precip_by_day = {row.day: row.total for row in precip_rows}
     et0_by_day = {row.day: row.total for row in et0_rows}
     common_days = sorted(set(precip_by_day) & set(et0_by_day))
@@ -340,6 +471,7 @@ async def build_recommendations(session: AsyncSession, parcel: Parcel, day: date
     return RecommendationsResult(
         day=day,
         variety_code=variety_code,
+        data_basis=data_basis,
         threats=threats_out,
         water_balance=water_balance_out,
         not_dynamically_modeled_threats=NOT_DYNAMICALLY_MODELED_THREATS,

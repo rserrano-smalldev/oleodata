@@ -1,4 +1,5 @@
 from datetime import date, timedelta
+from urllib.parse import quote
 
 from fastapi import FastAPI, Form, Request, UploadFile
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -75,17 +76,18 @@ async def ui_create_parcel(
         "area_ha": float(area_ha) if area_ha else None,
     }
     parcel = await api_client.post("/v1/parcels", json=payload)
-    return RedirectResponse(url=f"/parcel/{parcel['id']}", status_code=303)
+    note = parcel.get("initial_backfill_note") or ""
+    return RedirectResponse(url=f"/parcel/{parcel['id']}?note={quote(note)}", status_code=303)
 
 
 @app.get("/parcel/{parcel_id}")
-async def parcel_dashboard(request: Request, parcel_id: int):
+async def parcel_dashboard(request: Request, parcel_id: int, note: str = ""):
     parcel = await api_client.get(f"/v1/parcels/{parcel_id}")
     varieties = await api_client.get("/v1/varieties")
     default_day = (date.today() - timedelta(days=10)).isoformat()
     return templates.TemplateResponse(
         "parcel_dashboard.html",
-        {"request": request, "parcel": parcel, "varieties": varieties, "default_day": default_day},
+        {"request": request, "parcel": parcel, "varieties": varieties, "default_day": default_day, "note": note},
     )
 
 
@@ -102,9 +104,19 @@ async def ui_backfill(parcel_id: int, request: Request):
     return await api_client.post(f"/v1/parcels/{parcel_id}/backfill", json={"years_back": body.get("years_back", 25)})
 
 
+@app.post("/ui/parcel/{parcel_id}/backfill/sync")
+async def ui_backfill_sync(parcel_id: int):
+    return await api_client.post(f"/v1/parcels/{parcel_id}/backfill/sync", json={})
+
+
 @app.post("/ui/parcel/{parcel_id}/simulate-sensors")
 async def ui_simulate(parcel_id: int):
     return await api_client.post(f"/v1/parcels/{parcel_id}/simulate-sensors", json={})
+
+
+@app.post("/ui/parcel/{parcel_id}/fetch-forecast")
+async def ui_fetch_forecast(parcel_id: int):
+    return await api_client.post(f"/v1/parcels/{parcel_id}/fetch-forecast", json={})
 
 
 @app.get("/ui/parcel/{parcel_id}/daily.json")

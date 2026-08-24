@@ -13,21 +13,36 @@ from app.seed.varieties import THREATS, VARIETIES, VARIETY_SUSCEPTIBILITY
 logger = logging.getLogger(__name__)
 
 
-async def _seed_variables(session: AsyncSession) -> None:
-    stmt = pg_insert(Variable).values(VARIABLES).on_conflict_do_nothing(index_elements=["code"])
+async def _upsert(session: AsyncSession, model, rows: list[dict], conflict_cols: list[str]) -> None:
+    """INSERT ... ON CONFLICT DO UPDATE para tablas de catálogo (variable,
+    data_provider, olive_variety, threat, variety_susceptibility).
+
+    A diferencia de `observation` (donde DO NOTHING es lo correcto: una
+    lectura ya guardada no debe cambiar), estas tablas son código, no datos
+    de usuario: si se corrige un valor en el seed (por ejemplo, una
+    prioridad de proveedor mal puesta), el arranque siguiente de la API
+    debe reflejar el valor corregido, no quedarse con el primero que se
+    insertó hace tiempo.
+    """
+    if not rows:
+        return
+    stmt = pg_insert(model).values(rows)
+    update_cols = {col: getattr(stmt.excluded, col) for col in rows[0].keys() if col not in conflict_cols}
+    stmt = stmt.on_conflict_do_update(index_elements=conflict_cols, set_=update_cols)
     await session.execute(stmt)
+
+
+async def _seed_variables(session: AsyncSession) -> None:
+    await _upsert(session, Variable, VARIABLES, ["code"])
 
 
 async def _seed_providers(session: AsyncSession) -> None:
-    stmt = pg_insert(DataProvider).values(PROVIDERS).on_conflict_do_nothing(index_elements=["code"])
-    await session.execute(stmt)
+    await _upsert(session, DataProvider, PROVIDERS, ["code"])
 
 
 async def _seed_varieties_and_threats(session: AsyncSession) -> None:
-    stmt = pg_insert(OliveVariety).values(VARIETIES).on_conflict_do_nothing(index_elements=["code"])
-    await session.execute(stmt)
-    stmt = pg_insert(Threat).values(THREATS).on_conflict_do_nothing(index_elements=["code"])
-    await session.execute(stmt)
+    await _upsert(session, OliveVariety, VARIETIES, ["code"])
+    await _upsert(session, Threat, THREATS, ["code"])
 
 
 async def _seed_susceptibility(session: AsyncSession) -> None:
@@ -51,13 +66,7 @@ async def _seed_susceptibility(session: AsyncSession) -> None:
             }
         )
 
-    if rows:
-        stmt = (
-            pg_insert(VarietySusceptibility)
-            .values(rows)
-            .on_conflict_do_nothing(index_elements=["variety_id", "threat_id"])
-        )
-        await session.execute(stmt)
+    await _upsert(session, VarietySusceptibility, rows, ["variety_id", "threat_id"])
 
 
 async def seed_all(engine: AsyncEngine) -> None:
