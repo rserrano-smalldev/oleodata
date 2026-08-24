@@ -4,7 +4,7 @@ from datetime import date, datetime, timedelta, timezone
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from geoalchemy2 import WKTElement
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -12,12 +12,15 @@ from app.db import get_session
 from app.models.catalog import DataProvider, Variable
 from app.models.parcel import Parcel
 from app.models.timeseries import Observation, Source
+from app.models.treatment import Treatment
 from app.models.variety import OliveVariety
 from app.schemas.discovery import DiscoveryResponse
 from app.schemas.parcel import (
     BackfillRequest,
     ParcelCreate,
+    ParcelDeleteOut,
     ParcelOut,
+    ParcelUpdate,
     ParcelVarietyUpdate,
     SimulateSensorsRequest,
 )
@@ -204,6 +207,67 @@ async def update_parcel_variety(
     await session.commit()
     await session.refresh(parcel)
     return _parcel_to_out(parcel, variety_code)
+
+
+@router.patch("/{parcel_id}", response_model=ParcelOut)
+async def update_parcel(parcel_id: int, payload: ParcelUpdate, session: AsyncSession = Depends(get_session)):
+    """Edita nombre, variedad, superficie y/o capacidad de campo de una
+    parcela ya existente. Lat/lon/elevación son intencionadamente inmutables
+    (ver el docstring de `ParcelUpdate`): para eso hay que borrar la parcela
+    y darla de alta de nuevo en el sitio correcto.
+    """
+    parcel = await _get_parcel_or_404(session, parcel_id)
+    fields = payload.model_dump(exclude_unset=True)
+
+    if "name" in fields:
+        parcel.name = fields["name"]
+    if "area_ha" in fields:
+        parcel.area_ha = fields["area_ha"]
+    if "field_capacity_mm" in fields and fields["field_capacity_mm"] is not None:
+        parcel.field_capacity_mm = fields["field_capacity_mm"]
+    if "variety_code" in fields:
+        if fields["variety_code"]:
+            variety = (
+                await session.execute(select(OliveVariety).where(OliveVariety.code == fields["variety_code"]))
+            ).scalar_one_or_none()
+            if variety is None:
+                raise HTTPException(status_code=404, detail=f"Variedad desconocida: {fields['variety_code']!r}")
+            parcel.variety_id = variety.id
+        else:
+            parcel.variety_id = None
+
+    await session.commit()
+    await session.refresh(parcel)
+
+    variety_code = None
+    if parcel.variety_id:
+        variety = await session.get(OliveVariety, parcel.variety_id)
+        variety_code = variety.code if variety else None
+    return _parcel_to_out(parcel, variety_code)
+
+
+@router.delete("/{parcel_id}", response_model=ParcelDeleteOut)
+async def delete_parcel(parcel_id: int, session: AsyncSession = Depends(get_session)):
+    """Borra una parcela y todo lo que cuelga de ella: observaciones (real,
+    RIA y simulada), las fuentes (`source`) materializadas para ella, y su
+    cuaderno de tratamientos. Es destructivo e irreversible — el frontend
+    pide confirmación explícita antes de llamar a este endpoint.
+    """
+    parcel = await _get_parcel_or_404(session, parcel_id)
+
+    source_ids = (
+        await session.execute(select(Source.id).where(Source.parcel_id == parcel_id))
+    ).scalars().all()
+    if source_ids:
+        await session.execute(delete(Observation).where(Observation.source_id.in_(source_ids)))
+        await session.execute(delete(Source).where(Source.id.in_(source_ids)))
+    await session.execute(delete(Treatment).where(Treatment.parcel_id == parcel_id))
+
+    code = parcel.code
+    await session.delete(parcel)
+    await session.commit()
+
+    return ParcelDeleteOut(deleted=True, code=code)
 
 
 @router.post("/{parcel_id}/resolve-sources", response_model=DiscoveryResponse)

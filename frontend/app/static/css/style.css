@@ -88,7 +88,10 @@ button, .btn {
   display: inline-block;
 }
 button:hover, .btn:hover { background: var(--olive-dark); }
-button.secondary { background: #7d7d6d; }
+button.secondary, .btn.secondary { background: #7d7d6d; }
+button.danger, .btn.danger { background: #9a3324; }
+button.danger:hover, .btn.danger:hover { background: #7a2519; }
+.btn.small, button.small { padding: 0.3rem 0.6rem; font-size: 0.82rem; margin-top: 0; }
 
 table { width: 100%; border-collapse: collapse; margin-top: 0.75rem; font-size: 0.88rem; }
 th, td { border-bottom: 1px solid var(--border); padding: 0.4rem 0.5rem; text-align: left; }

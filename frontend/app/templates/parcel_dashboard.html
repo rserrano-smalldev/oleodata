@@ -29,6 +29,10 @@
   </select>
 
   <p><a class="btn" href="/parcel/{{ parcel.id }}/import-treatments">Importar tratamientos desde Excel →</a></p>
+  <p>
+    <a class="btn secondary" href="/parcel/{{ parcel.id }}/edit">Editar parcela</a>
+    <button class="danger" onclick="deleteParcel({{ parcel.id }}, '{{ parcel.code }}')">Eliminar parcela</button>
+  </p>
 </div>
 
 <div class="card">

@@ -354,6 +354,8 @@ POST /v1/discovery/point
 GET  /v1/parcels
 POST /v1/parcels                        (importa automáticamente 5 años de histórico + estación RIA si hay una a <10 km)
 GET  /v1/parcels/{id}
+PATCH /v1/parcels/{id}                  (nombre, variedad, superficie, capacidad de campo — lat/lon/altitud son inmutables)
+DELETE /v1/parcels/{id}                 (borra la parcela y todo lo que cuelga de ella: fuentes, observaciones, tratamientos)
 PATCH /v1/parcels/{id}/variety
 POST /v1/parcels/{id}/resolve-sources?dry_run=
 POST /v1/parcels/{id}/backfill          (años explícitos, por defecto 25)
@@ -375,7 +377,14 @@ GET  /v1/health
 Ver la sección [Stack](#stack) para la justificación de HTMX + Jinja2 +
 JS/Chart.js. Pantallas: alta de parcela + descubrimiento de fuentes
 (al crear la parcela se muestra una notificación de una sola vez con el
-resultado del import automático de 5 años); panel de la parcela con:
+resultado del import automático de 5 años); listado de parcelas con
+botones **Editar** y **Eliminar** por parcela (también presentes en el
+panel de cada parcela); un formulario de edición (`/parcel/{id}/edit`)
+para nombre, variedad, superficie y capacidad de campo — lat/lon/altitud
+quedan fuera a propósito, ver `ParcelUpdate` en `schemas/parcel.py` —, y
+un botón de borrado que pide confirmación explícita antes de eliminar la
+parcela junto con todo su histórico y su cuaderno de tratamientos; panel
+de la parcela con:
 
 - **Histórico**: gráfica + botones "Importar lo que falta hasta hoy" (sync
   incremental) e "Importar histórico completo (25 años)", más un filtro

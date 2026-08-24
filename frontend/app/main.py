@@ -99,6 +99,38 @@ async def ui_update_variety(parcel_id: int, request: Request):
     return result
 
 
+@app.get("/parcel/{parcel_id}/edit")
+async def parcel_edit_form(request: Request, parcel_id: int):
+    parcel = await api_client.get(f"/v1/parcels/{parcel_id}")
+    varieties = await api_client.get("/v1/varieties")
+    return templates.TemplateResponse(
+        "parcel_edit.html", {"request": request, "parcel": parcel, "varieties": varieties}
+    )
+
+
+@app.post("/ui/parcel/{parcel_id}/edit")
+async def ui_edit_parcel(
+    parcel_id: int,
+    name: str = Form(...),
+    variety_code: str = Form(""),
+    area_ha: str = Form(""),
+    field_capacity_mm: str = Form(""),
+):
+    payload = {
+        "name": name,
+        "variety_code": variety_code or None,
+        "area_ha": float(area_ha) if area_ha else None,
+        "field_capacity_mm": float(field_capacity_mm) if field_capacity_mm else None,
+    }
+    await api_client.patch(f"/v1/parcels/{parcel_id}", json=payload)
+    return RedirectResponse(url=f"/parcel/{parcel_id}", status_code=303)
+
+
+@app.post("/ui/parcel/{parcel_id}/delete")
+async def ui_delete_parcel(parcel_id: int):
+    return await api_client.delete(f"/v1/parcels/{parcel_id}")
+
+
 @app.post("/ui/parcel/{parcel_id}/backfill")
 async def ui_backfill(parcel_id: int, request: Request):
     body = await request.json()

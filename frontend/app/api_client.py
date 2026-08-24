@@ -44,6 +44,11 @@ async def patch(path: str, json: dict | None = None) -> dict:
         return await _handle(await client.patch(path, json=json or {}))
 
 
+async def delete(path: str) -> dict:
+    async with _client() as client:
+        return await _handle(await client.delete(path))
+
+
 async def post_file(path: str, filename: str, content: bytes) -> dict:
     async with _client() as client:
         files = {"file": (filename, content, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}

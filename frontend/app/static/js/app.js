@@ -32,6 +32,23 @@ async function updateVariety(parcelId, varietyCode) {
   loadRecommendations(parcelId);
 }
 
+async function deleteParcel(parcelId, code) {
+  const status = document.getElementById("delete-status");
+  const confirmed = confirm(
+    `¿Seguro que quieres eliminar la parcela "${code}"? Esto borra también su histórico ` +
+      "(ERA5-Land, RIA, simulado) y su cuaderno de tratamientos. No se puede deshacer."
+  );
+  if (!confirmed) return;
+  try {
+    await postJson(`/ui/parcel/${parcelId}/delete`, {});
+    window.location.href = "/";
+  } catch (e) {
+    const message = "Error al eliminar: " + e.message;
+    if (status) status.textContent = message;
+    else alert(message);
+  }
+}
+
 // ---------------------------------------------------------------------
 // Histórico REAL (ERA5-Land)
 // ---------------------------------------------------------------------

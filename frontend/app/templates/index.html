@@ -81,6 +81,8 @@
         <span class="tag real">Sensorización: sensores propios activos</span>
       {% endif %}
       </span>
+      <a class="btn secondary small" href="/parcel/{{ p.id }}/edit">Editar</a>
+      <button class="danger small" onclick="deleteParcel({{ p.id }}, '{{ p.code }}')">Eliminar</button>
     </div>
     {% endfor %}
   {% else %}
@@ -88,4 +90,5 @@
   {% endif %}
 </div>
 
+<script src="/static/js/app.js"></script>
 {% endblock %}

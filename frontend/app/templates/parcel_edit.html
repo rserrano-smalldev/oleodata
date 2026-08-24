@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}OleaData — Editar {{ parcel.code }}{% endblock %}
+{% block content %}
+
+<div class="card">
+  <h2>Editar {{ parcel.code }} — {{ parcel.name }}</h2>
+  <p class="small">
+    Lat/Lon/Altitud no se pueden editar aquí: cambiarlas dejaría el histórico ya importado
+    (ERA5-Land, RIA, simulador) asociado a un punto que ya no sería el de la parcela. Para
+    mover una parcela de sitio, bórrala y dala de alta de nuevo en las coordenadas correctas.
+  </p>
+
+  <form method="post" action="/ui/parcel/{{ parcel.id }}/edit">
+    <div class="row">
+      <div>
+        <label>Código (no editable)</label>
+        <input type="text" value="{{ parcel.code }}" disabled>
+      </div>
+      <div>
+        <label>Nombre</label>
+        <input type="text" name="name" value="{{ parcel.name }}" required>
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label>Latitud (no editable)</label>
+        <input type="text" value="{{ parcel.latitude }}" disabled>
+      </div>
+      <div>
+        <label>Longitud (no editable)</label>
+        <input type="text" value="{{ parcel.longitude }}" disabled>
+      </div>
+      <div>
+        <label>Altitud (no editable)</label>
+        <input type="text" value="{{ parcel.elevation_m }} m" disabled>
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label>Variedad</label>
+        <select name="variety_code">
+          <option value="">— sin asignar —</option>
+          {% for v in varieties %}
+          <option value="{{ v.code }}" {% if v.code == parcel.variety_code %}selected{% endif %}>{{ v.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label>Superficie (ha)</label>
+        <input type="number" step="any" name="area_ha" value="{{ parcel.area_ha or '' }}">
+      </div>
+      <div>
+        <label>Capacidad de campo (mm)</label>
+        <input type="number" step="any" name="field_capacity_mm" value="{{ parcel.field_capacity_mm }}">
+      </div>
+    </div>
+    <button type="submit">Guardar cambios</button>
+    <a class="btn secondary" href="/parcel/{{ parcel.id }}">Cancelar</a>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Eliminar parcela</h2>
+  <p class="small">
+    Borra la parcela y todo lo que cuelga de ella: histórico real (ERA5-Land, RIA), lecturas
+    simuladas y el cuaderno de tratamientos. <strong>Es irreversible.</strong>
+  </p>
+  <button class="danger" onclick="deleteParcel({{ parcel.id }}, '{{ parcel.code }}')">Eliminar parcela definitivamente</button>
+  <span id="delete-status" class="small"></span>
+</div>
+
+<script src="/static/js/app.js"></script>
+{% endblock %}

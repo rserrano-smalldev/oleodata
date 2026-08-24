@@ -38,6 +38,26 @@ class ParcelVarietyUpdate(BaseModel):
     variety_code: str | None = None
 
 
+class ParcelUpdate(BaseModel):
+    """Edición de una parcela ya existente. Lat/lon/elevación son
+    deliberadamente inmutables aquí: cambiarlas dejaría el histórico ya
+    importado (ERA5-Land, RIA, simulador) asociado a un punto que ya no es
+    el de la parcela, sin ningún aviso. Para mover una parcela de sitio, lo
+    correcto es borrarla y darla de alta de nuevo en las coordenadas
+    correctas.
+    """
+
+    name: str | None = None
+    variety_code: str | None = None
+    area_ha: float | None = None
+    field_capacity_mm: float | None = None
+
+
+class ParcelDeleteOut(BaseModel):
+    deleted: bool
+    code: str
+
+
 class BackfillRequest(BaseModel):
     years_back: int = Field(default=25, ge=1, le=75)
 
