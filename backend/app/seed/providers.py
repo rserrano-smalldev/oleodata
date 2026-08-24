@@ -1,0 +1,94 @@
+"""Catálogo de proveedores de datos.
+
+Solo `era5_land` y `sim_sensor_v1` tienen adaptador implementado en este MVP
+(has_adapter=True). Las redes regionales reales (AEMET, SIAR, RIA/RAIF) están
+catalogadas para que la arquitectura de descubrimiento las tenga en cuenta el
+día que se implemente su adaptador, pero hoy no aportan ningún dato: no se
+inventan estaciones ni lecturas para ellas.
+"""
+
+PROVIDERS = [
+    {
+        "code": "era5_land",
+        "name": "Open-Meteo Historical Weather API (ERA5-Land)",
+        "type": "reanalysis",
+        "coverage_geom": None,  # cobertura global
+        "base_priority": 50,
+        "adapter_name": "app.services.openmeteo_client.OpenMeteoERA5LandAdapter",
+        "has_adapter": True,
+        "variables_supported": [
+            "temperature_2m",
+            "relative_humidity_2m",
+            "precipitation",
+            "wind_speed_10m",
+            "shortwave_radiation",
+            "soil_moisture_7_28cm",
+            "et0_fao_evapotranspiration",
+        ],
+        "license": "CC BY 4.0",
+        "notes": (
+            "Reanálisis ERA5-Land, resolución ~9 km, histórico desde 1950, sin API "
+            "key. Única fuente climática REAL de este MVP. No mide humectación "
+            "foliar."
+        ),
+    },
+    {
+        "code": "aemet_stations",
+        "name": "Red de estaciones AEMET",
+        "type": "station_network",
+        "coverage_geom": None,
+        "base_priority": 10,
+        "adapter_name": None,
+        "has_adapter": False,
+        "variables_supported": ["temperature_2m", "relative_humidity_2m", "precipitation", "wind_speed_10m"],
+        "license": None,
+        "notes": "Sin adaptador implementado en este MVP. Catalogado para no requerir migración futura.",
+    },
+    {
+        "code": "siar_stations",
+        "name": "Red SIAR (agroclimática, MAPA)",
+        "type": "station_network",
+        "coverage_geom": None,
+        "base_priority": 15,
+        "adapter_name": None,
+        "has_adapter": False,
+        "variables_supported": [
+            "temperature_2m",
+            "relative_humidity_2m",
+            "precipitation",
+            "wind_speed_10m",
+            "et0_fao_evapotranspiration",
+        ],
+        "license": None,
+        "notes": "Sin adaptador implementado en este MVP. Catalogado para no requerir migración futura.",
+    },
+    {
+        "code": "ria_andalucia",
+        "name": "Red de Alerta e Información Fitosanitaria / RIA (Junta de Andalucía)",
+        "type": "station_network",
+        "coverage_geom": None,
+        "base_priority": 12,
+        "adapter_name": None,
+        "has_adapter": False,
+        "variables_supported": ["temperature_2m", "relative_humidity_2m", "precipitation", "wind_speed_10m"],
+        "license": None,
+        "notes": "Sin adaptador implementado en este MVP. Catalogado para no requerir migración futura.",
+    },
+    {
+        "code": "sim_sensor_v1",
+        "name": "Simulador de sensor de parcela (puente hasta hardware real)",
+        "type": "simulated_sensor",
+        "coverage_geom": None,
+        "base_priority": 5,
+        "adapter_name": "app.services.simulator.SyntheticSensorAdapter",
+        "has_adapter": True,
+        "variables_supported": ["temperature_2m", "precipitation", "leaf_wetness"],
+        "license": None,
+        "notes": (
+            "100% SIMULADO. Sustituye a un sensor físico pendiente de instalación. "
+            "No participa en el descubrimiento automático de fuentes climáticas "
+            "(módulo 2): se activa explícitamente por parcela vía "
+            "/v1/parcels/{id}/simulate-sensors."
+        ),
+    },
+]

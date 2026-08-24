@@ -1,0 +1,55 @@
+"""Inicialización idempotente de la base de datos.
+
+El MVP no usa un runner de migraciones (Alembic no forma parte del stack
+pedido): en su lugar, cada arranque de la API asegura que extensiones, tablas,
+la función SQL de distancia efectiva, la hypertable y los catálogos base
+existen, usando siempre CREATE ... IF NOT EXISTS / ON CONFLICT DO NOTHING.
+Volver a levantar el contenedor, o llamar a este código muchas veces durante
+el desarrollo, nunca duplica nada ni falla por "ya existe".
+"""
+
+import logging
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine
+
+from app.db import Base
+from app.models import *  # noqa: F401,F403  (registra las tablas en Base.metadata)
+from app.seed.run import seed_all
+
+logger = logging.getLogger(__name__)
+
+EFFECTIVE_DISTANCE_FUNCTION_SQL = """
+CREATE OR REPLACE FUNCTION effective_distance_km(
+    horizontal_km double precision,
+    elevation_diff_m double precision
+) RETURNS double precision AS $$
+    -- distancia_efectiva = sqrt(horizontal^2 + (desnivel * 0.1)^2)
+    -- El factor 0.1 aproxima el gradiente térmico vertical de ~0.65 C/100m:
+    -- 10 km horizontales producen una diferencia térmica del orden de la que
+    -- produce un desnivel de 100 m. Ver módulo 2 del README.
+    SELECT sqrt(
+        power(horizontal_km, 2) + power(coalesce(elevation_diff_m, 0) * 0.1, 2)
+    );
+$$ LANGUAGE SQL IMMUTABLE PARALLEL SAFE;
+"""
+
+
+async def init_db(engine: AsyncEngine) -> None:
+    async with engine.begin() as conn:
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis"))
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS timescaledb"))
+
+        await conn.run_sync(Base.metadata.create_all)
+
+        await conn.execute(text(EFFECTIVE_DISTANCE_FUNCTION_SQL))
+
+        await conn.execute(
+            text(
+                "SELECT create_hypertable('observation', 'timestamp', "
+                "if_not_exists => TRUE, migrate_data => TRUE)"
+            )
+        )
+
+    await seed_all(engine)
+    logger.info("Base de datos inicializada (extensiones, esquema, función SQL, hypertable, seed).")

@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}OleaData — Importar tratamientos{% endblock %}
+{% block content %}
+
+<div class="card">
+  <h2>Importar cuaderno de campo — {{ parcel.code }}</h2>
+  <p class="small">
+    Sube tu Excel tal cual lo llevas: el importador detecta la fila de cabecera y mapea columnas por
+    sinónimos habituales, no exige ninguna plantilla fija. Flujo en dos pasos: primero una
+    previsualización (no escribe nada), luego confirmas para importar de verdad.
+  </p>
+  <input type="file" id="file-input" accept=".xlsx">
+  <button onclick="previewImport()">Previsualizar</button>
+  <div id="preview-result"></div>
+</div>
+
+<script>
+let currentToken = null;
+
+async function previewImport() {
+  const input = document.getElementById("file-input");
+  const resultDiv = document.getElementById("preview-result");
+  if (!input.files.length) { resultDiv.innerHTML = '<p class="error-text">Elige un fichero.</p>'; return; }
+
+  resultDiv.innerHTML = "<p class='small'>Analizando…</p>";
+  const formData = new FormData();
+  formData.append("file", input.files[0]);
+
+  try {
+    const res = await fetch("/ui/parcel/{{ parcel.id }}/import/preview", { method: "POST", body: formData });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Error");
+    currentToken = data.token;
+
+    let html = `<p><strong>Cabecera detectada en la fila ${data.header_row_number}.</strong></p>`;
+    html += `<p>${data.rows_ok} filas listas para importar de ${data.total_data_rows} filas de datos. `;
+    html += `${data.rows_duplicate} duplicadas (omitidas). ${data.rows_error.length} con error.</p>`;
+
+    if (data.rows_error.length) {
+      html += "<table><thead><tr><th>Fila</th><th>Motivo</th></tr></thead><tbody>";
+      for (const e of data.rows_error) {
+        html += `<tr><td>${e.row_number}</td><td class="error-text">${e.reason}</td></tr>`;
+      }
+      html += "</tbody></table>";
+    }
+
+    if (data.sample.length) {
+      html += "<h3>Muestra de filas válidas</h3><table><thead><tr><th>Fecha</th><th>Categoría</th><th>Producto</th><th>Dosis</th></tr></thead><tbody>";
+      for (const r of data.sample) {
+        html += `<tr><td>${r.date}</td><td>${r.category}</td><td>${r.product_name || ""}</td><td>${r.dose_value || ""} ${r.dose_unit || ""}</td></tr>`;
+      }
+      html += "</tbody></table>";
+    }
+
+    if (data.rows_ok > 0) {
+      html += `<button onclick="commitImport()">Confirmar e importar ${data.rows_ok} filas</button>`;
+    }
+    resultDiv.innerHTML = html;
+  } catch (e) {
+    resultDiv.innerHTML = `<p class="error-text">${e.message}</p>`;
+  }
+}
+
+async function commitImport() {
+  const resultDiv = document.getElementById("preview-result");
+  try {
+    const res = await fetch("/ui/parcel/{{ parcel.id }}/import/commit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: currentToken }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Error");
+    resultDiv.innerHTML = `<p><strong>${data.inserted} tratamientos importados correctamente.</strong></p>`;
+  } catch (e) {
+    resultDiv.innerHTML += `<p class="error-text">${e.message}</p>`;
+  }
+}
+</script>
+{% endblock %}

@@ -1,0 +1,45 @@
+{% if error %}
+  <p class="error-text">Error: {{ error }}</p>
+{% else %}
+  <p class="small">Altitud usada para el cálculo de desnivel: {{ result.elevation_m }} m</p>
+  <table>
+    <thead>
+      <tr>
+        <th>Proveedor</th><th>Tipo</th><th>Rol</th><th>Dist. horizontal</th><th>Desnivel</th>
+        <th>Dist. efectiva</th><th>Puntuación</th><th>Estado</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for c in result.candidates %}
+      <tr>
+        <td>{{ c.provider_name }}</td>
+        <td>{{ c.provider_type }}</td>
+        <td>
+          {% if c.role %}<span class="tag role-primary">{{ c.role }}</span>{% else %}<span class="tag role-none">—</span>{% endif %}
+        </td>
+        <td>{{ "%.1f"|format(c.horizontal_km) + " km" if c.horizontal_km is not none else "—" }}</td>
+        <td>{{ "%.0f"|format(c.elevation_diff_m) + " m" if c.elevation_diff_m is not none else "—" }}</td>
+        <td>{{ "%.1f"|format(c.effective_km) + " km" if c.effective_km is not none else "—" }}</td>
+        <td>{{ "%.1f"|format(c.score) if c.score is not none else "—" }}</td>
+        <td>
+          {% if not c.has_adapter %}<span class="small">sin adaptador implementado</span>
+          {% elif c.needs_review %}<span class="tag needs-review">requiere revisión</span>
+          {% else %}ok{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  {% if result.coverage_warnings %}
+  <p><strong>Avisos de cobertura:</strong></p>
+  <ul>
+    {% for w in result.coverage_warnings %}<li class="small">{{ w }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+
+  <p><strong>Limitaciones declaradas:</strong></p>
+  <ul>
+    {% for l in result.limitations %}<li class="small">{{ l }}</li>{% endfor %}
+  </ul>
+{% endif %}

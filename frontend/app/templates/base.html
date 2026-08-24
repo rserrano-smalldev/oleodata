@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}OleaData{% endblock %}</title>
+  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">🫒 OleaData <span class="badge-demo">MVP DEMO</span></a>
+    <nav>
+      <a href="/">Parcelas</a>
+    </nav>
+  </header>
+  <main class="container">
+    <div class="demo-banner">
+      Esta es una <strong>demo funcional</strong>: el histórico climático (ERA5-Land / Open-Meteo) es
+      <strong>real</strong>. Las lecturas de sensor de parcela son <strong>100% simuladas</strong>
+      (no hay hardware instalado todavía). El sistema nunca recomienda producto, materia activa ni dosis.
+    </div>
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

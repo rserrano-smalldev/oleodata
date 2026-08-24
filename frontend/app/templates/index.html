@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}OleaData — Parcelas{% endblock %}
+{% block content %}
+
+<div class="card">
+  <h2>1. Descubre qué cubre tu punto (sin dar de alta nada)</h2>
+  <p class="small">Coordenadas precargadas con la finca de referencia (Los Pedroches, Córdoba). Funciona para cualquier punto del planeta.</p>
+  <form hx-post="/ui/discover" hx-target="#discovery-result" hx-indicator="#discover-spinner">
+    <div class="row">
+      <div>
+        <label>Latitud</label>
+        <input type="number" step="any" name="lat" value="{{ reference_lat }}" required>
+      </div>
+      <div>
+        <label>Longitud</label>
+        <input type="number" step="any" name="lon" value="{{ reference_lon }}" required>
+      </div>
+    </div>
+    <button type="submit">Descubrir fuentes de datos</button>
+    <span id="discover-spinner" class="spinner htmx-indicator">buscando…</span>
+  </form>
+  <div id="discovery-result"></div>
+</div>
+
+<div class="card">
+  <h2>2. Da de alta tu parcela</h2>
+  <form method="post" action="/ui/parcels">
+    <div class="row">
+      <div>
+        <label>Código</label>
+        <input type="text" name="code" placeholder="FINCA-01" required>
+      </div>
+      <div>
+        <label>Nombre</label>
+        <input type="text" name="name" placeholder="Los Pedroches" required>
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label>Latitud</label>
+        <input type="number" step="any" name="lat" value="{{ reference_lat }}" required>
+      </div>
+      <div>
+        <label>Longitud</label>
+        <input type="number" step="any" name="lon" value="{{ reference_lon }}" required>
+      </div>
+      <div>
+        <label>Altitud (m) — opcional</label>
+        <input type="number" step="any" name="elevation_m" placeholder="se resuelve automáticamente si se deja vacío">
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label>Variedad</label>
+        <select name="variety_code">
+          <option value="">— sin asignar —</option>
+          {% for v in varieties %}
+          <option value="{{ v.code }}">{{ v.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label>Superficie (ha) — opcional</label>
+        <input type="number" step="any" name="area_ha">
+      </div>
+    </div>
+    <button type="submit">Crear parcela</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Parcelas dadas de alta</h2>
+  {% if parcels %}
+    {% for p in parcels %}
+    <div class="parcel-list-item">
+      <a href="/parcel/{{ p.id }}"><strong>{{ p.code }}</strong> — {{ p.name }}</a>
+      <span class="small">({{ p.latitude }}, {{ p.longitude }}, {{ p.elevation_m }} m) — {{ p.variety_code or "sin variedad" }} —
+      {% if p.sensorization_status == 'simulada_demo' %}
+        <span class="tag simulated">Sensorización: simulada (demo)</span>
+      {% else %}
+        <span class="tag real">Sensorización: sensores propios activos</span>
+      {% endif %}
+      </span>
+    </div>
+    {% endfor %}
+  {% else %}
+    <p class="small">Todavía no hay parcelas. Da de alta la de arriba para empezar la demo.</p>
+  {% endif %}
+</div>
+
+{% endblock %}

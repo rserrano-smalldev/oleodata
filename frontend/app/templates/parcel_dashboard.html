@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}OleaData — {{ parcel.code }}{% endblock %}
+{% block content %}
+
+<div class="card">
+  <h2>{{ parcel.code }} — {{ parcel.name }}</h2>
+  <p class="small">
+    Lat/Lon: {{ parcel.latitude }}, {{ parcel.longitude }} · Altitud: {{ parcel.elevation_m }} m ·
+    Superficie: {{ parcel.area_ha or "—" }} ha · Capacidad de campo: {{ parcel.field_capacity_mm }} mm
+  </p>
+  <p>
+    {% if parcel.sensorization_status == 'simulada_demo' %}
+      <span class="tag simulated">Sensorización: simulada (demo)</span>
+    {% else %}
+      <span class="tag real">Sensorización: sensores propios activos</span>
+    {% endif %}
+  </p>
+
+  <label>Variedad de olivo</label>
+  <select id="variety-select" onchange="updateVariety({{ parcel.id }}, this.value)">
+    <option value="">— sin asignar —</option>
+    {% for v in varieties %}
+    <option value="{{ v.code }}" {% if v.code == parcel.variety_code %}selected{% endif %}>{{ v.name }}</option>
+    {% endfor %}
+  </select>
+
+  <p><a class="btn" href="/parcel/{{ parcel.id }}/import-treatments">Importar tratamientos desde Excel →</a></p>
+</div>
+
+<div class="card">
+  <h2>Histórico climático REAL (ERA5-Land / Open-Meteo)</h2>
+  <p class="small">Descarga y almacena hasta 25 años de histórico real de esta parcela.</p>
+  <button onclick="runBackfill({{ parcel.id }})">Importar histórico de 25 años</button>
+  <span id="backfill-status" class="small"></span>
+  <canvas id="historyChart" height="90"></canvas>
+</div>
+
+<div class="card">
+  <h2>Sensores <span class="tag simulated">SIMULADO</span></h2>
+  <p class="small">
+    Genera un mes de lecturas sintéticas de sensor de parcela (cada 15 minutos), derivadas del histórico
+    ERA5-Land real más un sesgo de sensor y ruido de instrumento. Requiere haber importado antes el histórico.
+  </p>
+  <button onclick="runSimulate({{ parcel.id }})">Simular sensores del último mes</button>
+  <span id="simulate-status" class="small"></span>
+  <canvas id="simulatedChart" height="90"></canvas>
+</div>
+
+<div class="card">
+  <h2>Recomendaciones</h2>
+  <label>Día a evaluar</label>
+  <input type="date" id="rec-day" value="{{ default_day }}" onchange="loadRecommendations({{ parcel.id }})">
+  <div id="recommendations-panel">cargando…</div>
+</div>
+
+<script src="/static/js/app.js"></script>
+<script>
+  const PARCEL_ID = {{ parcel.id }};
+  document.addEventListener("DOMContentLoaded", () => loadRecommendations(PARCEL_ID));
+</script>
+{% endblock %}
