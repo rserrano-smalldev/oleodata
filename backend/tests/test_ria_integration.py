@@ -152,29 +152,66 @@ def test_parse_dmsh_coord_matches_meteospain_formula():
     assert round(_parse_dmsh_coord("042643000W"), 4) == round(-4.445277777777778, 4)
 
 
+def _fake_400_error():
+    request = httpx.Request("GET", "http://test/datosdiarios")
+    response = httpx.Response(400, request=request)
+    return httpx.HTTPStatusError("Bad Request", request=request, response=response)
+
+
 async def test_fetch_daily_range_resilient_splits_on_400_bad_request():
     """Bug real: pedir ~2 años de golpe a datosdiarios da 400 Bad Request (el
     límite real de rango por petición no está documentado). El wrapper debe
     partir el rango en dos y reintentar cada mitad en vez de tirar la
-    sincronización entera con un 500."""
+    sincronización entera con un 500. RIA_MAX_RETRY_SHRINKS es bajo a
+    propósito (ver docstring del módulo), así que este test usa un rango de
+    partida pequeño para que la mitad "buena" quede dentro de esas pocas
+    particiones permitidas."""
     calls = []
 
     async def fake_fetch(provincia_id, codigo_estacion, start_date, end_date):
         calls.append((start_date, end_date))
-        if (end_date - start_date).days > 10:
-            request = httpx.Request("GET", "http://test/datosdiarios")
-            response = httpx.Response(400, request=request)
-            raise httpx.HTTPStatusError("Bad Request", request=request, response=response)
+        if (end_date - start_date).days > 5:
+            raise _fake_400_error()
         return [{"fecha": start_date.isoformat()}]
 
     class FakeAdapter:
         fetch_daily_range = staticmethod(fake_fetch)
 
     result = await _fetch_daily_range_resilient(
-        FakeAdapter(), 14, 102, date(2020, 1, 1), date(2021, 12, 31)
+        FakeAdapter(), 14, 102, date(2020, 1, 1), date(2020, 1, 21)
     )
     assert len(calls) > 1  # tuvo que partir el rango al menos una vez
     assert isinstance(result, list) and len(result) > 0
+
+
+async def test_fetch_daily_range_resilient_gives_up_cleanly_when_everything_is_400():
+    """Bug real reportado por el usuario: para una estación/periodo concreto
+    (IFAPA Hinojosa del Duque, finales de 2022), la API devolvía 400 para
+    CUALQUIER rango, incluso un solo día. Antes de este test, el wrapper
+    seguía partiendo el rango recursivamente sin límite real, generando
+    cientos de peticiones reales a la API antes de "no responder" — y si
+    llegaba a agotar las particiones con un tramo todavía de varios días,
+    relanzaba el 400 en vez de rendirse, lo que también podía tirar la
+    sincronización entera con un 500. Debe rendirse rápido (pocas peticiones)
+    y devolver una lista vacía, nunca una excepción, para un 400 persistente.
+    """
+    calls = []
+
+    async def always_400(provincia_id, codigo_estacion, start_date, end_date):
+        calls.append((start_date, end_date))
+        raise _fake_400_error()
+
+    class FakeAdapter:
+        fetch_daily_range = staticmethod(always_400)
+
+    result = await _fetch_daily_range_resilient(
+        FakeAdapter(), 14, 102, date(2018, 1, 1), date(2023, 1, 1)
+    )
+    assert result == []
+    # Con RIA_MAX_RETRY_SHRINKS bajo, el número de peticiones para un solo
+    # bloque debe quedarse en un puñado, nunca en cientos (día a día durante
+    # años).
+    assert len(calls) < 20
 
 
 async def test_ensure_ria_stations_cached_decodes_real_dmsh_coordinate_format(db_session):

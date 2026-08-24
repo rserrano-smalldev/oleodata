@@ -296,14 +296,23 @@ desarrollo). API pública, sin API key, solo cubre Andalucía.
   diario. Esto reproduce el mínimo/máximo diario exactos, pero una media
   calculada sobre esos 3 puntos es una aproximación. Documentado en la
   cabecera de `app/services/ria_sync.py`.
-- **Límite de rango por petición (no documentado oficialmente)**: pedir
-  `datosdiarios` con un rango de ~2 años de una vez devuelve `400 Bad
-  Request` (confirmado en producción). Se troceó a 1 año por petición
-  (`RIA_CHUNK_YEARS`), y además `_fetch_daily_range_resilient` parte el
-  rango en dos y reintenta cada mitad si aun así llega un 400 (hasta
-  `RIA_MAX_RETRY_SHRINKS` veces): es preferible histórico parcial a que
-  toda la sincronización de una parcela falle con un 500 por un límite de
-  la API que no está publicado en ningún sitio.
+- **400 Bad Request en `datosdiarios` (no siempre es el tamaño del rango)**:
+  pedir ~2 años de golpe devuelve 400. Pero al probarlo con una estación
+  real concreta (IFAPA Hinojosa del Duque, cerca de la finca de
+  referencia), se confirmó que un 400 **también puede significar que esa
+  estación no tiene datos en ese periodo**, ni siquiera para un solo día —
+  no es solo un límite de tamaño. Por eso `_fetch_daily_range_resilient`
+  parte el rango en dos y reintenta cada mitad, pero con un tope BAJO
+  (`RIA_MAX_RETRY_SHRINKS = 2`) y sin propagar nunca el 400 hacia arriba:
+  la primera versión de este arreglo no tenía tope real y, al toparse con
+  una estación que rechazaba todo, acababa troceando día a día durante
+  años enteros — cientos de peticiones reales e inútiles a la API de la
+  Junta de Andalucía antes de responder. Además, `_fetch_and_store_ria_range`
+  tiene un "circuit breaker": si varios bloques anuales seguidos
+  (`RIA_MAX_CONSECUTIVE_EMPTY_CHUNKS`) no traen NINGÚN dato, se detiene ahí
+  con lo que ya se haya conseguido en vez de agotar el resto del rango
+  pedido. Solo un error que no sea 400 (fallo de red, 5xx) se sigue
+  propagando de verdad, porque ese sí es inesperado.
 - El motor de recomendaciones (`app/services/agronomy/engine.py`) combina
   RIA + ERA5-Land + previsión con el mismo criterio de prioridad genérico
   que ya usa `/daily` (`app/services/daily_series.py`): para cada día gana

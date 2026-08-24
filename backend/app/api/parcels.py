@@ -414,8 +414,10 @@ async def ria_sync(parcel_id: int, session: AsyncSession = Depends(get_session))
         "note": (
             "Ya estaba al día, no había nada nuevo que importar."
             if summary.already_up_to_date
-            else "Histórico diario REAL de la estación RIA importado, usado con prioridad sobre "
-            "ERA5-Land en las recomendaciones (estación real > reanálisis)."
+            else f"Histórico diario REAL de la estación RIA importado ({summary.days_fetched} días), "
+            "usado con prioridad sobre ERA5-Land en las recomendaciones (estación real > reanálisis). "
+            "Si la estación no tenía datos para todo el rango pedido, la sincronización se detiene "
+            "pronto en vez de agotar peticiones — repite la llamada más tarde para completar lo que falte."
         ),
     }
 

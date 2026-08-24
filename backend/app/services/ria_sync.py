@@ -62,8 +62,17 @@ from app.services.sources import get_or_create_source, get_provider_by_code
 
 logger = logging.getLogger(__name__)
 
-RIA_CHUNK_YEARS = 1  # la API real devuelve 400 Bad Request con bloques de 2 años; 1 año funciona
-RIA_MAX_RETRY_SHRINKS = 10  # suficiente para poder llegar a partir hasta un solo día si hiciera falta
+RIA_CHUNK_YEARS = 1  # bloques de 2 años daban 400 Bad Request; con 1 año se ha visto menos, pero no es garantía
+# Tope BAJO a propósito: un 400 puede deberse a que la estación simplemente
+# no tiene datos en ese periodo (no solo a que el rango sea demasiado
+# grande). Si se permite seguir partiendo indefinidamente, un fallo
+# sistemático de la estación entera acaba intentando día por día durante
+# años — cientos de peticiones reales e inútiles a la API de la Junta de
+# Andalucía. Con 2, como mucho se intentan unas pocas particiones antes de
+# rendirse en ese bloque (ver también el "circuit breaker" de bloques
+# consecutivos sin datos en _fetch_and_store_ria_range).
+RIA_MAX_RETRY_SHRINKS = 2
+RIA_MAX_CONSECUTIVE_EMPTY_CHUNKS = 2  # bloques de nivel superior sin NINGÚN dato antes de abortar del todo
 RIA_LATENCY_DAYS = 1  # sin confirmar oficialmente cuánto tarda RIA en publicar el día en curso
 INSERT_BATCH_SIZE = 5000
 
@@ -350,24 +359,27 @@ async def _fetch_daily_range_resilient(
     depth: int = 0,
 ) -> list[dict]:
     """Como `RIAAdapter.fetch_daily_range`, pero si la API responde 400 Bad
-    Request (el límite real de rango por petición no está documentado: 2
-    años ya lo dispara, ver RIA_CHUNK_YEARS) parte el rango por la mitad y
-    reintenta cada mitad, hasta RIA_MAX_RETRY_SHRINKS veces. Si un tramo
-    sigue fallando en el último nivel, se salta ese tramo concreto (con un
-    aviso) en vez de perder todo el bloque: es preferible histórico
-    incompleto y declarado a un 500 que tira toda la sincronización.
+    Request parte el rango por la mitad y reintenta cada mitad, hasta
+    RIA_MAX_RETRY_SHRINKS veces. Un 400 puede deberse tanto a un rango
+    demasiado grande como a que la estación simplemente no tenga datos en
+    ese periodo (confirmado en producción: hasta un solo día puede dar 400);
+    por eso el tope de particiones es bajo y, al agotarlo, SIEMPRE se
+    abandona ese tramo con un aviso — nunca se propaga el 400 hacia arriba,
+    para no acabar troceando día a día durante años enteros ni tirar la
+    sincronización entera con un 500. Solo un error que no sea 400 (fallo de
+    red, 5xx, etc.) se propaga de verdad, porque ese sí es inesperado.
     """
     try:
         return await adapter.fetch_daily_range(provincia_id, codigo_estacion, start_date, end_date)
     except httpx.HTTPStatusError as exc:
-        if exc.response.status_code != 400 or start_date >= end_date or depth >= RIA_MAX_RETRY_SHRINKS:
-            if start_date >= end_date:
-                logger.warning(
-                    "RIA: %s/%s sigue devolviendo 400 incluso para un solo día (%s), se omite.",
-                    provincia_id, codigo_estacion, start_date,
-                )
-                return []
+        if exc.response.status_code != 400:
             raise
+        if start_date >= end_date or depth >= RIA_MAX_RETRY_SHRINKS:
+            logger.warning(
+                "RIA: %s/%s sigue devolviendo 400 para %s -> %s tras %d partición(es), se omite este tramo.",
+                provincia_id, codigo_estacion, start_date, end_date, depth,
+            )
+            return []
         midpoint = start_date + (end_date - start_date) / 2
         logger.warning(
             "RIA: %s/%s devolvió 400 para %s -> %s, se parte en %s -> %s y %s -> %s.",
@@ -403,12 +415,33 @@ async def _fetch_and_store_ria_range(
     adapter = adapter or RIAAdapter()
     total_days = 0
     total_written = 0
+    consecutive_empty_chunks = 0
 
     for chunk_start, chunk_end in _iter_year_chunks(start_date, end_date):
         logger.info("RIA source=%s estación=%s: bloque %s -> %s", source.code, station.code, chunk_start, chunk_end)
         daily_rows = await _fetch_daily_range_resilient(
             adapter, int(provincia_id), int(codigo_estacion), chunk_start, chunk_end
         )
+
+        if not daily_rows:
+            consecutive_empty_chunks += 1
+            if consecutive_empty_chunks >= RIA_MAX_CONSECUTIVE_EMPTY_CHUNKS:
+                # Circuit breaker: un 400 puede ser "la estación no tiene
+                # datos en este periodo" tanto como "el rango es demasiado
+                # grande". Si varios bloques seguidos no traen NINGÚN día,
+                # seguir troceando el resto del histórico (a veces años)
+                # solo generaría cientos de peticiones reales inútiles a la
+                # API de la Junta de Andalucía. Se detiene aquí con lo que
+                # ya se haya conseguido, en vez de agotar el resto del rango.
+                logger.error(
+                    "RIA source=%s estación=%s: %d bloques consecutivos sin ningún dato — "
+                    "se detiene la sincronización aquí (probablemente esta estación no tiene "
+                    "histórico disponible por esta vía para el resto del rango pedido).",
+                    source.code, station.code, consecutive_empty_chunks,
+                )
+                break
+        else:
+            consecutive_empty_chunks = 0
 
         rows = []
         for day_payload in daily_rows:
