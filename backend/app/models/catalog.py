@@ -1,7 +1,7 @@
 from datetime import datetime
 
 from geoalchemy2 import Geography
-from sqlalchemy import JSON, Boolean, DateTime, Enum, Float, ForeignKey, Integer, String, func
+from sqlalchemy import JSON, Boolean, DateTime, Enum, Float, ForeignKey, Integer, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -61,12 +61,14 @@ class DataProvider(Base):
 class Station(Base):
     """Estación física perteneciente a un proveedor de tipo station_network.
 
-    En este MVP no hay ningún proveedor de red de estaciones con adaptador
-    implementado, así que esta tabla existe pero puede estar vacía: queda
-    lista para cuando se añadan AEMET/SIAR/RIA.
+    Para RIA (con adaptador real) se cachea aquí el listado real de
+    estaciones la primera vez que se necesita (ver app/services/ria_sync.py).
+    AEMET/SIAR siguen sin adaptador, así que para ellos esta tabla no tiene
+    filas todavía.
     """
 
     __tablename__ = "station"
+    __table_args__ = (UniqueConstraint("provider_id", "code", name="uq_station_provider_code"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     provider_id: Mapped[int] = mapped_column(ForeignKey("data_provider.id"), nullable=False)

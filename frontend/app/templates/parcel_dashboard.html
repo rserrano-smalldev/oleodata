@@ -85,6 +85,18 @@
 </div>
 
 <div class="card">
+  <h2>Estación RIA cercana <span class="tag real">REAL</span></h2>
+  <p class="small">
+    Red de Información Agroclimática de Andalucía (Junta de Andalucía). Si hay una estación real a
+    menos de 10 km de esta parcela, su histórico diario se usa con prioridad sobre ERA5-Land en las
+    recomendaciones (estación real &gt; reanálisis). RIA solo cubre Andalucía y no mide humectación
+    foliar ni ET0/radiación fiables desde aquí.
+  </p>
+  <button onclick="runRiaSync({{ parcel.id }})">Comprobar / sincronizar estación RIA</button>
+  <span id="ria-status" class="small"></span>
+</div>
+
+<div class="card">
   <h2>Previsión meteorológica (próximos días) <span class="tag real">REAL</span></h2>
   <p class="small">
     Previsión real de Open-Meteo (no histórico, no simulación). Se usa para las recomendaciones de

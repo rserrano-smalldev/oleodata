@@ -29,6 +29,7 @@ from app.services.daily_series import get_daily_series, get_raw_observations
 from app.services.discovery import discover_sources
 from app.services.forecast import fetch_and_store_forecast
 from app.services.openmeteo_client import fetch_elevation
+from app.services.ria_sync import ensure_ria_stations_cached, find_nearby_ria_station, sync_parcel_ria
 from app.services.simulator import NoHistoryError, simulate_sensor_readings
 from app.services.sources import get_or_create_source
 
@@ -46,7 +47,10 @@ async def _get_parcel_or_404(session: AsyncSession, parcel_id: int) -> Parcel:
 
 
 def _parcel_to_out(
-    parcel: Parcel, variety_code: str | None, initial_backfill_note: str | None = None
+    parcel: Parcel,
+    variety_code: str | None,
+    initial_backfill_note: str | None = None,
+    ria_note: str | None = None,
 ) -> ParcelOut:
     return ParcelOut(
         id=parcel.id,
@@ -61,7 +65,32 @@ def _parcel_to_out(
         sensorization_status=parcel.sensorization_status.value,
         created_at=parcel.created_at,
         initial_backfill_note=initial_backfill_note,
+        ria_note=ria_note,
     )
+
+
+async def _try_auto_ria_sync(session: AsyncSession, parcel: Parcel) -> str | None:
+    """Si hay una estación RIA real a menos de `ria_max_distance_km` (10 km
+    por defecto), la cachea/usa automáticamente. Nunca falla la creación de
+    la parcela si la red de RIA no responde: se degrada a una nota, igual
+    que ya se hace con ERA5-Land."""
+    try:
+        await ensure_ria_stations_cached(session)
+        nearby = await find_nearby_ria_station(session, parcel.latitude, parcel.longitude)
+        if nearby is None:
+            return None
+        summary = await sync_parcel_ria(session, parcel, nearby)
+        return (
+            f"Estación RIA real '{summary.station_name}' (código {summary.station_code}) a "
+            f"{summary.horizontal_km:.1f} km: {summary.days_fetched} días de histórico real "
+            "importados y usados con prioridad sobre ERA5-Land en las recomendaciones."
+        )
+    except httpx.HTTPError as exc:
+        logger.warning("No se pudo comprobar/sincronizar estaciones RIA para %s: %s", parcel.code, exc)
+        return (
+            "No se ha podido comprobar si hay una estación RIA cercana (fallo de red). "
+            "Usa el botón de sincronizar RIA en el panel de la parcela para reintentarlo."
+        )
 
 
 @router.get("", response_model=list[ParcelOut])
@@ -135,7 +164,9 @@ async def create_parcel(payload: ParcelCreate, session: AsyncSession = Depends(g
             "Usa el botón de importar histórico en el panel de la parcela para reintentarlo."
         )
 
-    return _parcel_to_out(parcel, payload.variety_code, initial_backfill_note=note)
+    ria_note = await _try_auto_ria_sync(session, parcel)
+
+    return _parcel_to_out(parcel, payload.variety_code, initial_backfill_note=note, ria_note=ria_note)
 
 
 @router.get("/{parcel_id}", response_model=ParcelOut)
@@ -242,6 +273,47 @@ async def backfill_sync(parcel_id: int, session: AsyncSession = Depends(get_sess
             "Ya estaba al día, no había nada nuevo que importar."
             if summary.already_up_to_date
             else "Histórico REAL de Open-Meteo / ERA5-Land (CC BY 4.0) actualizado hasta hoy."
+        ),
+    }
+
+
+@router.post("/{parcel_id}/ria/sync")
+async def ria_sync(parcel_id: int, session: AsyncSession = Depends(get_session)):
+    """Comprueba (o vuelve a comprobar) si hay una estación RIA real a menos
+    de `ria_max_distance_km` (10 km por defecto) y trae/actualiza su
+    histórico diario real. A diferencia de ERA5-Land, RIA solo cubre
+    Andalucía: si no hay ninguna estación cerca, la respuesta lo declara
+    explícitamente en vez de fingir cobertura.
+    """
+    parcel = await _get_parcel_or_404(session, parcel_id)
+    await ensure_ria_stations_cached(session)
+    nearby = await find_nearby_ria_station(session, parcel.latitude, parcel.longitude)
+    if nearby is None:
+        return {
+            "station_found": False,
+            "note": (
+                "Ninguna estación RIA real a menos de "
+                f"{get_settings().ria_max_distance_km:.0f} km de esta parcela "
+                "(RIA solo cubre Andalucía)."
+            ),
+        }
+
+    summary = await sync_parcel_ria(session, parcel, nearby)
+    return {
+        "station_found": True,
+        "source_id": summary.source_id,
+        "station_code": summary.station_code,
+        "station_name": summary.station_name,
+        "horizontal_km": summary.horizontal_km,
+        "start_date": summary.start_date,
+        "end_date": summary.end_date,
+        "days_fetched": summary.days_fetched,
+        "already_up_to_date": summary.already_up_to_date,
+        "note": (
+            "Ya estaba al día, no había nada nuevo que importar."
+            if summary.already_up_to_date
+            else "Histórico diario REAL de la estación RIA importado, usado con prioridad sobre "
+            "ERA5-Land en las recomendaciones (estación real > reanálisis)."
         ),
     }
 

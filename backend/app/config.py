@@ -29,6 +29,12 @@ class Settings(BaseSettings):
     discovery_needs_review_elevation_diff_m: float = 150.0
     discovery_needs_review_horizontal_km: float = 25.0
 
+    ria_base_url: str = "https://www.juntadeandalucia.es"
+    # Regla de negocio específica de RIA (no la del descubrimiento genérico
+    # anterior): usar automáticamente una estación real solo si está a menos
+    # de esta distancia HORIZONTAL, tal cual lo pidió el usuario.
+    ria_max_distance_km: float = 10.0
+
     # Variables consideradas críticas para los modelos agronómicos: si ninguna
     # fuente descubierta las cubre, la API debe declararlo explícitamente.
     critical_variable_codes: tuple[str, ...] = (

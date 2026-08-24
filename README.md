@@ -31,7 +31,8 @@ producto fitosanitario en cualquier texto de respuesta.
 | Previsión de los próximos 7 días | **REAL** | Open-Meteo Forecast API, sin API key. Se reemplaza por completo cada vez que se refresca (no se acumula como el histórico). Usada por el motor de recomendaciones para días futuros. |
 | Altitud de la parcela | **REAL** | API de elevación de Open-Meteo, resuelta en el alta de la parcela (nunca hardcodeada). |
 | Lecturas de sensor de parcela (temperatura, precipitación, humectación foliar) a resolución de 15 min | **100% SIMULADO** | No hay hardware instalado. Ver [módulo 3](#módulo-3--simulador-de-sensores). Etiquetado como tal en BD (`source.is_simulated`, `data_provider.type='simulated_sensor'`), en la API (`is_simulated: true`) y en la interfaz (badge naranja "SIMULADO"). |
-| Redes de estaciones regionales (AEMET, SIAR, RIA/RAIF) | **NO IMPLEMENTADO** | Catalogadas en `data_provider` con `has_adapter=false` para que la arquitectura las soporte sin migrar nada, pero no aportan ningún dato en este MVP. |
+| Estación RIA (Red de Información Agroclimática de Andalucía) | **REAL, solo si hay una estación a &lt;10 km** | API pública de la Junta de Andalucía, sin API key. Ver [RIA](#red-de-información-agroclimática-de-andalucía-ria). Si hay una estación real cerca, su histórico diario se usa con prioridad sobre ERA5-Land (estación real > reanálisis). Solo cubre Andalucía. No mide humectación foliar; su radiación/ET0 no se mapean (unidades no verificadas). |
+| Redes de estaciones regionales (AEMET, SIAR) | **NO IMPLEMENTADO** | Catalogadas en `data_provider` con `has_adapter=false` para que la arquitectura las soporte sin migrar nada, pero no aportan ningún dato en este MVP. |
 | Umbrales de los modelos agronómicos (GDD, repilo, helada, Kc) | **Valores de partida de literatura general** | No calibrados con datos de campo de ninguna explotación real. Ver [módulo 4](#módulo-4--modelos-agronómicos). |
 | Susceptibilidad varietal | **Caracterización de bibliografía divulgativa, no citas primarias verificadas línea a línea** | Ver el aviso completo en `backend/app/seed/varieties.py`. |
 
@@ -215,8 +216,51 @@ Adaptadores reales implementados en `app/services/openmeteo_client.py`:
   para que un histórico ya confirmado nunca sea sobrescrito por una
   previsión en el raro caso de solape de un día).
 
-AEMET/SIAR/RIA están catalogados con `has_adapter=false`: la arquitectura
-los soporta sin refactorizar nada el día que se añadan.
+AEMET/SIAR están catalogados con `has_adapter=false`: la arquitectura los
+soporta sin refactorizar nada el día que se añadan. RIA sí tiene adaptador
+real — ver la sección siguiente.
+
+#### Red de Información Agroclimática de Andalucía (RIA)
+
+Adaptador real en `app/services/ria_client.py`, verificado contra el código
+fuente abierto del paquete R `meteospain` (no se pudo acceder directamente a
+la documentación oficial de juntadeandalucia.es desde el entorno de
+desarrollo). API pública, sin API key, ~100 estaciones, solo cubre Andalucía.
+
+- **Caché de estaciones** (`app/services/ria_sync.py`): la primera vez que
+  se necesita, se trae el listado real de estaciones y se cachea en
+  `station` (idempotente, `UNIQUE (provider_id, code)`). No se vuelve a
+  pedir a la red mientras haya alguna estación cacheada.
+- **Regla "menos de 10 km"**: al dar de alta una parcela (y también vía
+  `POST /v1/parcels/{id}/ria/sync`), si hay una estación RIA real a menos de
+  `ria_max_distance_km` (10 km, distancia puramente **horizontal** — no la
+  `effective_distance_km` ponderada por desnivel del descubrimiento
+  genérico anterior), se sincroniza su histórico diario y se usa con
+  prioridad sobre ERA5-Land: estación real > reanálisis
+  (`base_priority`: RIA 12, ERA5-Land 50, previsión 55, todos leídos de
+  `data_provider`, nunca hardcodeados en el motor de recomendaciones).
+- **Qué se mapea y qué no**: temperatura, humedad relativa, viento medio y
+  precipitación, inequívocos. RIA también ofrece radiación y ET0 (ruta
+  `forceEt0`), pero sus unidades no se han podido verificar desde este
+  entorno de desarrollo: **no se mapean**, para no inventar una conversión.
+  El balance hídrico sigue usando ET0 de ERA5-Land/previsión aunque la
+  parcela tenga estación RIA activa. RIA tampoco mide humectación foliar
+  (ninguna red pública la mide en este MVP): el repilo sigue dependiendo del
+  simulador de sensores o de la previsión.
+- **Aproximación de resolución declarada**: RIA publica agregados
+  **diarios** (mínimo/medio/máximo), no horarios. Para reutilizar sin
+  cambios las consultas SQL basadas en `MIN()`/`MAX()` por día, cada día se
+  representa con 3 timestamps sintéticos (06:00, 12:00, 18:00 UTC, sin
+  relación con la hora real de esos valores) para temperatura y humedad;
+  viento y precipitación usan un único punto al mediodía con el valor
+  diario. Esto reproduce el mínimo/máximo diario exactos, pero una media
+  calculada sobre esos 3 puntos es una aproximación. Documentado en la
+  cabecera de `app/services/ria_sync.py`.
+- El motor de recomendaciones (`app/services/agronomy/engine.py`) combina
+  RIA + ERA5-Land + previsión con el mismo criterio de prioridad genérico
+  que ya usa `/daily` (`app/services/daily_series.py`): para cada día gana
+  la fuente de mejor prioridad que tenga dato ese día, el resto no se
+  descarta.
 
 ### Módulo 3 — Simulador de sensores
 
@@ -299,12 +343,13 @@ que el frontend del módulo 7 funcionara — están marcados en el código):
 ```
 POST /v1/discovery/point
 GET  /v1/parcels
-POST /v1/parcels                        (importa automáticamente 5 años de histórico)
+POST /v1/parcels                        (importa automáticamente 5 años de histórico + estación RIA si hay una a <10 km)
 GET  /v1/parcels/{id}
 PATCH /v1/parcels/{id}/variety
 POST /v1/parcels/{id}/resolve-sources?dry_run=
 POST /v1/parcels/{id}/backfill          (años explícitos, por defecto 25)
 POST /v1/parcels/{id}/backfill/sync     (solo lo que falta hasta hoy)
+POST /v1/parcels/{id}/ria/sync          (comprueba/sincroniza estación RIA real a <10 km)
 POST /v1/parcels/{id}/fetch-forecast    (previsión real, próximos 7 días)
 POST /v1/parcels/{id}/simulate-sensors
 GET  /v1/parcels/{id}/daily
@@ -370,7 +415,11 @@ Este README no pretende dar la impresión de que el MVP está más acabado de
 lo que está. Para pasar de esta demo a un sistema productivo falta, como
 mínimo:
 
-- Adaptadores reales de AEMET, SIAR y RIA/RAIF (catalogados pero inactivos).
+- Adaptadores reales de AEMET y SIAR (catalogados pero inactivos; RIA ya
+  tiene adaptador real, ver la sección de módulo 2).
+- Verificar las unidades reales de radiación/ET0 de RIA contra la
+  documentación oficial de la Junta de Andalucía y, si son correctas,
+  mapearlas (hoy deliberadamente no se mapean, ver módulo 2).
 - Sensores físicos de parcela de verdad, sustituyendo al simulador del
   módulo 3 (la arquitectura ya está preparada: solo cambia qué adaptador
   escribe en `observation`, con `is_simulated=false`).

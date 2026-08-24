@@ -1,0 +1,389 @@
+"""Integración RIA (Red de Información Agroclimática de Andalucía):
+
+- caché de estaciones reales (idempotente, sin volver a llamar a la red si
+  ya hay estaciones cacheadas)
+- regla "estación a menos de 10 km" (distancia puramente horizontal)
+- sincronización de histórico diario por parcela, con la convención de 3
+  puntos sintéticos por día para temperatura/humedad
+- preferencia de RIA sobre ERA5-Land en el motor de recomendaciones cuando
+  ambas fuentes cubren el mismo día
+
+No golpea la red real de juntadeandalucia.es (bloqueada desde el sandbox de
+desarrollo): se inyecta un RIAAdapter falso con datos de ejemplo.
+"""
+
+from datetime import date, timedelta
+
+from geoalchemy2 import WKTElement
+from sqlalchemy import delete, select
+
+from app.models.catalog import Station, Variable
+from app.models.parcel import Parcel
+from app.models.timeseries import Observation, Source
+from app.services.agronomy.engine import build_recommendations
+from app.services.backfill import _ensure_era5_source
+from app.services.ria_sync import (
+    RIA_LATENCY_DAYS,
+    NearbyStation,
+    ensure_ria_stations_cached,
+    find_nearby_ria_station,
+    sync_parcel_ria,
+)
+from app.services.sources import get_provider_by_code
+
+TEST_PARCEL_CODE = "TEST-RIA-INTEGRATION-PARCEL"
+# Los Pedroches, Córdoba (misma finca de referencia del README).
+PARCEL_LAT, PARCEL_LON = 38.521823062719164, -5.159543633627551
+
+NEAR_STATION_CODE = "TEST-RIA-NEAR"  # a ~2 km del punto de referencia
+FAR_STATION_CODE = "TEST-RIA-FAR"  # a >10 km del punto de referencia
+# codigoEstacion real de RIA es numérico (ver docstring de ria_client.py): un
+# código de test numérico distinto, usado solo por el test de sincronización.
+NUMERIC_TEST_STATION_CODE = "9001"
+ALL_TEST_STATION_CODES = [NEAR_STATION_CODE, FAR_STATION_CODE, NUMERIC_TEST_STATION_CODE]
+
+
+class FakeRIAAdapter:
+    """Sustituye a RIAAdapter en los tests: nunca llama a la red real."""
+
+    def __init__(self, stations=None, daily_by_station=None):
+        self._stations = stations or []
+        self._daily_by_station = daily_by_station or {}
+        self.fetch_stations_calls = 0
+        self.fetch_daily_range_calls = 0
+
+    async def fetch_stations(self):
+        self.fetch_stations_calls += 1
+        return self._stations
+
+    async def fetch_daily_range(self, provincia_id, codigo_estacion, start_date, end_date):
+        self.fetch_daily_range_calls += 1
+        return self._daily_by_station.get(codigo_estacion, [])
+
+
+async def _clean_ria_test_fixtures(session):
+    provider = await get_provider_by_code(session, "ria_andalucia")
+    station_ids = (
+        await session.execute(
+            select(Station.id).where(
+                Station.provider_id == provider.id,
+                Station.code.in_(ALL_TEST_STATION_CODES),
+            )
+        )
+    ).scalars().all()
+    if station_ids:
+        source_ids = (
+            await session.execute(select(Source.id).where(Source.station_id.in_(station_ids)))
+        ).scalars().all()
+        if source_ids:
+            await session.execute(delete(Observation).where(Observation.source_id.in_(source_ids)))
+            await session.execute(delete(Source).where(Source.id.in_(source_ids)))
+        await session.execute(delete(Station).where(Station.id.in_(station_ids)))
+    await session.commit()
+    return provider
+
+
+async def _ensure_test_parcel(session) -> Parcel:
+    existing = (
+        await session.execute(select(Parcel).where(Parcel.code == TEST_PARCEL_CODE))
+    ).scalar_one_or_none()
+    if existing is not None:
+        return existing
+    parcel = Parcel(
+        code=TEST_PARCEL_CODE,
+        name="Parcela de test de integración RIA",
+        location=WKTElement(f"POINT({PARCEL_LON} {PARCEL_LAT})", srid=4326),
+        latitude=PARCEL_LAT,
+        longitude=PARCEL_LON,
+        elevation_m=545.0,
+    )
+    session.add(parcel)
+    await session.commit()
+    await session.refresh(parcel)
+    return parcel
+
+
+async def test_ensure_ria_stations_cached_is_idempotent_and_does_not_refetch(db_session):
+    provider = await _clean_ria_test_fixtures(db_session)
+
+    fake = FakeRIAAdapter(
+        stations=[
+            {
+                "codigoEstacion": NEAR_STATION_CODE,
+                "nombre": "Estación de test cercana",
+                "provincia_id": 5,
+                "provincia_nombre": "Córdoba",
+                "altitud": 545,
+                "latitud": PARCEL_LAT + 0.01,  # ~1.1 km al norte
+                "longitud": PARCEL_LON,
+                "bajoplastico": False,
+            },
+            {
+                "codigoEstacion": FAR_STATION_CODE,
+                "nombre": "Estación de test lejana",
+                "provincia_id": 5,
+                "provincia_nombre": "Córdoba",
+                "altitud": 600,
+                "latitud": PARCEL_LAT + 0.2,  # ~22 km al norte
+                "longitud": PARCEL_LON,
+                "bajoplastico": False,
+            },
+        ]
+    )
+
+    count = await ensure_ria_stations_cached(db_session, adapter=fake)
+    assert count >= 2
+    assert fake.fetch_stations_calls == 1
+
+    stations = (
+        await db_session.execute(
+            select(Station).where(
+                Station.provider_id == provider.id,
+                Station.code.in_([NEAR_STATION_CODE, FAR_STATION_CODE]),
+            )
+        )
+    ).scalars().all()
+    assert {s.code for s in stations} == {NEAR_STATION_CODE, FAR_STATION_CODE}
+    near = next(s for s in stations if s.code == NEAR_STATION_CODE)
+    assert near.metadata_json["provincia_id"] == 5
+    assert near.elevation_m == 545.0
+
+    # Ya hay estaciones cacheadas para este proveedor: NO debe volver a llamar a fetch_stations.
+    fake_should_not_be_called = FakeRIAAdapter(stations=[{"codigoEstacion": "SHOULD-NOT-APPEAR"}])
+    count2 = await ensure_ria_stations_cached(db_session, adapter=fake_should_not_be_called)
+    assert count2 == count
+    assert fake_should_not_be_called.fetch_stations_calls == 0
+
+    await _clean_ria_test_fixtures(db_session)
+
+
+async def test_find_nearby_ria_station_uses_pure_horizontal_10km_rule(db_session):
+    provider = await _clean_ria_test_fixtures(db_session)
+
+    near = Station(
+        provider_id=provider.id,
+        code=NEAR_STATION_CODE,
+        name="Estación de test cercana",
+        location=WKTElement(f"POINT({PARCEL_LON} {PARCEL_LAT + 0.01})", srid=4326),
+        elevation_m=545.0,
+        metadata_json={"provincia_id": 5},
+    )
+    far = Station(
+        provider_id=provider.id,
+        code=FAR_STATION_CODE,
+        name="Estación de test lejana",
+        location=WKTElement(f"POINT({PARCEL_LON} {PARCEL_LAT + 0.2})", srid=4326),
+        elevation_m=600.0,
+        metadata_json={"provincia_id": 5},
+    )
+    db_session.add_all([near, far])
+    await db_session.commit()
+
+    result = await find_nearby_ria_station(db_session, PARCEL_LAT, PARCEL_LON, max_km=10.0)
+    assert result is not None
+    assert result.station.code == NEAR_STATION_CODE
+    assert result.horizontal_km < 10.0
+
+    # Un punto lejos de ambas estaciones de test: ninguna a menos de 1 km.
+    isolated_lat = PARCEL_LAT - 1.0
+    result_far_only = await find_nearby_ria_station(db_session, isolated_lat, PARCEL_LON, max_km=1.0)
+    assert result_far_only is None
+
+    await _clean_ria_test_fixtures(db_session)
+
+
+async def test_sync_parcel_ria_writes_synthetic_points_preserving_daily_minmax(db_session):
+    provider = await _clean_ria_test_fixtures(db_session)
+    parcel = await _ensure_test_parcel(db_session)
+
+    await db_session.execute(
+        delete(Station).where(Station.provider_id == provider.id, Station.code == NUMERIC_TEST_STATION_CODE)
+    )
+    station = Station(
+        provider_id=provider.id,
+        code=NUMERIC_TEST_STATION_CODE,
+        name="Estación de test cercana",
+        location=WKTElement(f"POINT({PARCEL_LON} {PARCEL_LAT + 0.01})", srid=4326),
+        elevation_m=545.0,
+        metadata_json={"provincia_id": 5},
+    )
+    db_session.add(station)
+    await db_session.commit()
+    await db_session.refresh(station)
+
+    # Limpiar cualquier observación de una fuente RIA de esta parcela de pruebas anteriores.
+    old_source = (
+        await db_session.execute(
+            select(Source).where(Source.code == f"ria_andalucia:parcel:{parcel.id}")
+        )
+    ).scalar_one_or_none()
+    if old_source is not None:
+        await db_session.execute(delete(Observation).where(Observation.source_id == old_source.id))
+        await db_session.execute(delete(Source).where(Source.id == old_source.id))
+        await db_session.commit()
+
+    # Exactamente en el último día que sync_parcel_ria puede pedir (hoy -
+    # RIA_LATENCY_DAYS): así, tras esta única sincronización, la fuente queda
+    # completamente al día y una segunda llamada debe detectarlo sin más red.
+    target_day = date.today() - timedelta(days=RIA_LATENCY_DAYS)
+    daily_payload = [
+        {
+            "fecha": target_day.isoformat(),
+            "tempMin": 4.0,
+            "tempMedia": 12.0,
+            "tempMax": 22.0,
+            "humedadMin": 30.0,
+            "humedadMedia": 55.0,
+            "humedadMax": 90.0,
+            "velViento": 1.8,
+            "precipitacion": 0.0,
+        }
+    ]
+
+    nearby = NearbyStation(station=station, horizontal_km=1.1)
+    fake = FakeRIAAdapter(daily_by_station={int(NUMERIC_TEST_STATION_CODE): daily_payload})
+
+    summary = await sync_parcel_ria(db_session, parcel, nearby, initial_years_back=1, adapter=fake)
+    assert summary.already_up_to_date is False
+    assert summary.rows_inserted_or_existing > 0
+
+    variable_ids = dict((await db_session.execute(select(Variable.code, Variable.id))).all())
+
+    temp_values = (
+        await db_session.execute(
+            select(Observation.value)
+            .where(Observation.source_id == summary.source_id)
+            .where(Observation.variable_id == variable_ids["temperature_2m"])
+        )
+    ).scalars().all()
+    assert min(temp_values) == 4.0
+    assert max(temp_values) == 22.0
+
+    humidity_values = (
+        await db_session.execute(
+            select(Observation.value)
+            .where(Observation.source_id == summary.source_id)
+            .where(Observation.variable_id == variable_ids["relative_humidity_2m"])
+        )
+    ).scalars().all()
+    assert min(humidity_values) == 30.0
+    assert max(humidity_values) == 90.0
+
+    # Segunda llamada: ya está al día (mismo `target_day`, sin más datos que traer).
+    summary2 = await sync_parcel_ria(db_session, parcel, nearby, initial_years_back=1, adapter=fake)
+    assert summary2.already_up_to_date is True
+
+    await db_session.execute(delete(Observation).where(Observation.source_id == summary.source_id))
+    await db_session.execute(delete(Source).where(Source.id == summary.source_id))
+    await db_session.execute(delete(Station).where(Station.id == station.id))
+    await db_session.commit()
+    await _clean_ria_test_fixtures(db_session)
+
+
+async def test_engine_prefers_ria_over_era5_when_both_cover_the_same_day(db_session):
+    provider = await _clean_ria_test_fixtures(db_session)
+    parcel = await _ensure_test_parcel(db_session)
+
+    variable_ids = dict((await db_session.execute(select(Variable.code, Variable.id))).all())
+
+    era5_source = await _ensure_era5_source(db_session, parcel)
+
+    station = Station(
+        provider_id=provider.id,
+        code=NEAR_STATION_CODE,
+        name="Estación de test cercana",
+        location=WKTElement(f"POINT({PARCEL_LON} {PARCEL_LAT + 0.01})", srid=4326),
+        elevation_m=545.0,
+        metadata_json={"provincia_id": 5},
+    )
+    db_session.add(station)
+    await db_session.commit()
+    await db_session.refresh(station)
+
+    ria_provider = provider
+    ria_source = Source(
+        provider_id=ria_provider.id,
+        station_id=station.id,
+        parcel_id=parcel.id,
+        code=f"ria_andalucia:parcel:{parcel.id}",
+        is_simulated=False,
+        metadata_json={"basis": "ria_andalucia"},
+    )
+    # Limpiar una fuente RIA anterior de esta parcela si existiera (de otro test).
+    existing_ria_source = (
+        await db_session.execute(select(Source).where(Source.code == ria_source.code))
+    ).scalar_one_or_none()
+    if existing_ria_source is not None:
+        await db_session.execute(delete(Observation).where(Observation.source_id == existing_ria_source.id))
+        ria_source = existing_ria_source
+    else:
+        db_session.add(ria_source)
+    await db_session.commit()
+    await db_session.refresh(ria_source)
+
+    target_day = date.today() - timedelta(days=10)
+    ts_min = ria_sync_utc(target_day, 6)
+    ts_max = ria_sync_utc(target_day, 18)
+
+    # ERA5-Land: valores claramente distintos, para poder distinguir cuál gana.
+    await db_session.execute(
+        delete(Observation).where(
+            Observation.source_id == era5_source.id,
+            Observation.variable_id == variable_ids["temperature_2m"],
+            Observation.timestamp >= ria_sync_utc(target_day, 0),
+            Observation.timestamp < ria_sync_utc(target_day + timedelta(days=1), 0),
+        )
+    )
+    db_session.add_all(
+        [
+            Observation(
+                timestamp=ria_sync_utc(target_day, 3),
+                source_id=era5_source.id,
+                variable_id=variable_ids["temperature_2m"],
+                value=1.0,
+            ),
+            Observation(
+                timestamp=ria_sync_utc(target_day, 15),
+                source_id=era5_source.id,
+                variable_id=variable_ids["temperature_2m"],
+                value=99.0,
+            ),
+        ]
+    )
+
+    db_session.add_all(
+        [
+            Observation(
+                timestamp=ts_min,
+                source_id=ria_source.id,
+                variable_id=variable_ids["temperature_2m"],
+                value=4.0,
+            ),
+            Observation(
+                timestamp=ts_max,
+                source_id=ria_source.id,
+                variable_id=variable_ids["temperature_2m"],
+                value=22.0,
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    result = await build_recommendations(db_session, parcel, target_day)
+    assert result.data_basis == "historico_ria"
+
+    frost_threat = next((t for t in result.threats if t["threat_code"] == "helada"), None)
+    assert frost_threat is not None
+    # Si hubiera ganado ERA5-Land (1.0 / 99.0), este valor sería distinto de 4.0.
+    assert frost_threat["model_detail"]["daily_min_temp_c"] == 4.0
+
+    await db_session.execute(delete(Observation).where(Observation.source_id == ria_source.id))
+    await db_session.execute(delete(Source).where(Source.id == ria_source.id))
+    await db_session.commit()
+    await _clean_ria_test_fixtures(db_session)
+
+
+def ria_sync_utc(day: date, hour: int):
+    from datetime import datetime, time, timezone
+
+    return datetime.combine(day, time(hour, 0), tzinfo=timezone.utc)

@@ -278,6 +278,23 @@ async function runFetchForecast(parcelId) {
   }
 }
 
+async function runRiaSync(parcelId) {
+  const status = document.getElementById("ria-status");
+  status.textContent = "Comprobando estaciones RIA reales cerca de esta parcela…";
+  try {
+    const result = await postJson(`/ui/parcel/${parcelId}/ria/sync`, {});
+    status.textContent = result.station_found
+      ? `Estación '${result.station_name}' (${result.horizontal_km} km): ${result.note}`
+      : result.note;
+    if (result.station_found) {
+      await drawHistoryChart(parcelId);
+      loadRecommendations(parcelId);
+    }
+  } catch (e) {
+    status.textContent = "Error: " + e.message;
+  }
+}
+
 // ---------------------------------------------------------------------
 // Tabla genérica con filtro (pivota una lista de {key, variable, value} en
 // filas por `key` con una columna por variable) y paginación en cliente.
@@ -369,9 +386,13 @@ async function loadRecommendations(parcelId) {
 
 function renderRecommendations(data) {
   let html = "";
-  const basisTag = data.data_basis === "prevision"
-    ? '<span class="tag real">Basado en PREVISIÓN</span>'
-    : '<span class="tag role-primary">Basado en histórico real</span>';
+  const basisTags = {
+    historico_ria: '<span class="tag role-primary">Basado en histórico real — estación RIA</span>',
+    historico_era5: '<span class="tag role-primary">Basado en histórico real — ERA5-Land</span>',
+    prevision: '<span class="tag real">Basado en PREVISIÓN</span>',
+    sin_dato: '<span class="tag simulated">Sin dato climático para este día</span>',
+  };
+  const basisTag = basisTags[data.data_basis] || "";
   html += `<p>${basisTag}</p>`;
 
   if (data.warnings && data.warnings.length) {

@@ -64,15 +64,23 @@ PROVIDERS = [
     },
     {
         "code": "ria_andalucia",
-        "name": "Red de Alerta e Información Fitosanitaria / RIA (Junta de Andalucía)",
+        "name": "Red de Información Agroclimática de Andalucía / RIA (Junta de Andalucía)",
         "type": "station_network",
-        "coverage_geom": None,
-        "base_priority": 12,
-        "adapter_name": None,
-        "has_adapter": False,
+        "coverage_geom": None,  # determinado en la práctica por las estaciones reales cacheadas
+        "base_priority": 12,  # mejor prioridad que era5_land (50): estación real > reanálisis
+        "adapter_name": "app.services.ria_client.RIAAdapter",
+        "has_adapter": True,
         "variables_supported": ["temperature_2m", "relative_humidity_2m", "precipitation", "wind_speed_10m"],
         "license": None,
-        "notes": "Sin adaptador implementado en este MVP. Catalogado para no requerir migración futura.",
+        "notes": (
+            "API REST real y pública de la Junta de Andalucía (~100 estaciones), sin API key. "
+            "No mide humectación foliar. La API también ofrece radiación y ET0 (ruta "
+            "'forceEt0') pero no se han podido verificar sus unidades desde este entorno de "
+            "desarrollo: no se mapean, para no inventar una conversión. El balance hídrico "
+            "sigue usando ET0 de ERA5-Land/previsión aunque la parcela tenga estación RIA "
+            "cerca. Solo se usa automáticamente para una parcela si hay una estación real a "
+            "menos de 10 km (ver app/services/ria_sync.py)."
+        ),
     },
     {
         "code": "open_meteo_forecast",

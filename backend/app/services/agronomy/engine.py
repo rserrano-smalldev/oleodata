@@ -21,7 +21,7 @@ from datetime import date, datetime, timedelta, timezone
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.catalog import Variable
+from app.models.catalog import DataProvider, Variable
 from app.models.parcel import Parcel
 from app.models.timeseries import Observation, Source
 from app.models.variety import Threat, VarietySusceptibility
@@ -76,7 +76,7 @@ DAILY_SUM_SQL = text(
 class RecommendationsResult:
     day: date
     variety_code: str | None
-    data_basis: str  # "historico_era5" | "prevision"
+    data_basis: str  # "historico_ria" | "historico_era5" | "prevision" | "sin_dato"
     threats: list[dict]
     water_balance: dict | None
     not_dynamically_modeled_threats: list[str]
@@ -113,16 +113,70 @@ def _utc(d: date) -> datetime:
     return datetime.combine(d, datetime.min.time(), tzinfo=timezone.utc)
 
 
-async def _last_era5_date(session: AsyncSession, era5_source: Source, temperature_variable_id: int) -> date | None:
+async def _last_observed_date(session: AsyncSession, source: Source, variable_id: int) -> date | None:
     ts = (
         await session.execute(
             select(func.max(Observation.timestamp)).where(
-                Observation.source_id == era5_source.id,
-                Observation.variable_id == temperature_variable_id,
+                Observation.source_id == source.id,
+                Observation.variable_id == variable_id,
             )
         )
     ).scalar_one_or_none()
     return ts.date() if ts else None
+
+
+async def _sources_by_priority(session: AsyncSession, sources: list[Source | None]) -> list[Source]:
+    """Ordena fuentes reales (descarta None) de mejor a peor prioridad, usando
+    el mismo criterio genérico que ya usa daily_series.py para /daily
+    (data_provider.base_priority, menor = mejor): estación RIA real (12) >
+    ERA5-Land (50) > previsión (55). No se hardcodea el orden aquí: se lee
+    de la BD, así que si el catálogo cambia, este motor lo sigue sin tocar
+    código."""
+    present = [s for s in sources if s is not None]
+    if not present:
+        return []
+    provider_ids = [s.provider_id for s in present]
+    priorities = dict(
+        (
+            await session.execute(
+                select(DataProvider.id, DataProvider.base_priority).where(DataProvider.id.in_(provider_ids))
+            )
+        ).all()
+    )
+    return sorted(present, key=lambda s: priorities[s.provider_id])
+
+
+async def _winning_source_for_day(
+    session: AsyncSession, sources_by_priority: list[Source], variable_id: int, day: date
+) -> Source | None:
+    """De las fuentes en orden de prioridad, la primera que tenga al menos un
+    dato de `variable_id` en `day` (mismo criterio "gana la de mejor
+    prioridad que tenga dato ese día" que _combined_daily, pero solo para
+    un día concreto, usado para etiquetar data_basis)."""
+    for source in sources_by_priority:
+        exists = (
+            await session.execute(
+                select(Observation.value)
+                .where(Observation.source_id == source.id)
+                .where(Observation.variable_id == variable_id)
+                .where(Observation.timestamp >= _utc(day))
+                .where(Observation.timestamp < _utc(day + timedelta(days=1)))
+                .limit(1)
+            )
+        ).first()
+        if exists is not None:
+            return source
+    return None
+
+
+def _data_basis_label(source: Source | None) -> str:
+    if source is None:
+        return "sin_dato"
+    if source.code.startswith("ria_andalucia:"):
+        return "historico_ria"
+    if source.code.startswith("era5_land:"):
+        return "historico_era5"
+    return "prevision"
 
 
 async def _daily_minmax_rows(session: AsyncSession, source_id: int, variable_id: int, start: date, end: date):
@@ -150,42 +204,58 @@ async def _daily_sum_rows(session: AsyncSession, source_id: int, variable_id: in
 async def _combined_daily(
     fetch_fn,
     session: AsyncSession,
-    era5_source: Source,
-    forecast_source: Source | None,
-    last_era5_date: date | None,
+    sources_by_priority: list[Source],
     variable_id: int,
     start: date,
     end: date,
 ):
-    """Combina histórico ERA5-Land (hasta `last_era5_date`) con previsión (a
-    partir de ahí) para un rango [start, end], usando `fetch_fn` (agregación
-    diaria min/max o sum) sobre cada tramo. Si el rango cae por completo en
-    uno de los dos, el otro tramo simplemente no aporta filas.
+    """Combina N fuentes (ya ordenadas de mejor a peor prioridad, ver
+    `_sources_by_priority`) para un rango [start, end], usando `fetch_fn`
+    (agregación diaria min/max o sum) sobre cada una. Para cada día gana la
+    fuente de mejor prioridad que tenga dato ese día concreto — el resto no
+    se descarta, simplemente no gana ese día (mismo criterio que ya usa
+    daily_series.py para /daily). Con estación RIA real cerca, esto hace que
+    gane RIA los días que cubre, caiga a ERA5-Land donde RIA no llega, y
+    caiga a la previsión solo para días futuros que ninguna de las dos
+    fuentes históricas puede tener todavía.
     """
-    rows = list(await fetch_fn(session, era5_source.id, variable_id, start, min(end, last_era5_date) if last_era5_date else start - timedelta(days=1)))
-
-    forecast_start = (last_era5_date + timedelta(days=1)) if last_era5_date else start
-    if forecast_source is not None:
-        rows += list(await fetch_fn(session, forecast_source.id, variable_id, max(start, forecast_start), end))
-
-    return sorted(rows, key=lambda r: r.day)
+    claimed: dict[date, object] = {}
+    for source in sources_by_priority:
+        rows = await fetch_fn(session, source.id, variable_id, start, end)
+        for row in rows:
+            claimed.setdefault(row.day, row)
+    return sorted(claimed.values(), key=lambda r: r.day)
 
 
 async def build_recommendations(session: AsyncSession, parcel: Parcel, day: date) -> RecommendationsResult:
     var_ids = await get_variable_ids(session)
     era5_source = await _get_source(session, f"era5_land:parcel:{parcel.id}")
+    ria_source = await _get_source(session, f"ria_andalucia:parcel:{parcel.id}")
     sim_source = await _get_source(session, f"sim_sensor_v1:parcel:{parcel.id}")
     forecast_source = await _get_source(session, f"open_meteo_forecast:parcel:{parcel.id}")
 
-    if era5_source is None:
+    if era5_source is None and ria_source is None:
         raise MissingDataError(
-            "No hay histórico ERA5-Land para esta parcela: ejecuta antes "
-            "POST /v1/parcels/{id}/backfill."
+            "No hay histórico climático (ERA5-Land ni estación RIA) para esta parcela: "
+            "ejecuta antes POST /v1/parcels/{id}/backfill."
         )
 
-    last_era5_date = await _last_era5_date(session, era5_source, var_ids["temperature_2m"])
-    using_forecast_for_day = last_era5_date is None or day > last_era5_date
-    data_basis = "prevision" if using_forecast_for_day else "historico_era5"
+    # Prioridad RIA (estación real) > ERA5-Land (reanálisis) > previsión, leída
+    # de data_provider.base_priority — no hardcodeada (ver _sources_by_priority).
+    historical_sources = await _sources_by_priority(session, [ria_source, era5_source])
+    all_sources_by_priority = await _sources_by_priority(session, [ria_source, era5_source, forecast_source])
+
+    last_historical_date: date | None = None
+    for source in historical_sources:
+        source_last_date = await _last_observed_date(session, source, var_ids["temperature_2m"])
+        if source_last_date is not None and (last_historical_date is None or source_last_date > last_historical_date):
+            last_historical_date = source_last_date
+
+    winning_source_for_day = await _winning_source_for_day(
+        session, all_sources_by_priority, var_ids["temperature_2m"], day
+    )
+    data_basis = _data_basis_label(winning_source_for_day)
+    using_forecast_for_day = winning_source_for_day is None or data_basis == "prevision"
 
     susceptibility_map = await _susceptibility_map(session, parcel.variety_id)
     variety_code = parcel.variety.code if parcel.variety else None
@@ -195,16 +265,16 @@ async def build_recommendations(session: AsyncSession, parcel: Parcel, day: date
 
     if using_forecast_for_day and forecast_source is None:
         warnings.append(
-            "El día solicitado cae fuera del histórico ERA5-Land y todavía no se ha "
-            "descargado ninguna previsión: ejecuta antes POST /v1/parcels/{id}/fetch-forecast "
-            "para poder evaluar días futuros."
+            "El día solicitado cae fuera del histórico disponible (ERA5-Land / estación RIA) y "
+            "todavía no se ha descargado ninguna previsión: ejecuta antes "
+            "POST /v1/parcels/{id}/fetch-forecast para poder evaluar días futuros."
         )
 
     # --- Prays oleae: GDD acumulado desde el 1 de enero del año de `day`, ---
-    # combinando histórico ERA5-Land con previsión si `day` cae en el futuro.
+    # combinando histórico (RIA/ERA5-Land) con previsión si `day` cae en el futuro.
     year_start = date(day.year, 1, 1)
     minmax_rows = await _combined_daily(
-        _daily_minmax_rows, session, era5_source, forecast_source, last_era5_date,
+        _daily_minmax_rows, session, all_sources_by_priority,
         var_ids["temperature_2m"], year_start, day,
     )
 
@@ -239,7 +309,7 @@ async def build_recommendations(session: AsyncSession, parcel: Parcel, day: date
     day_row = next((row for row in minmax_rows if row.day == day), None)
     if day_row is None:
         single_day_rows = await _combined_daily(
-            _daily_minmax_rows, session, era5_source, forecast_source, last_era5_date,
+            _daily_minmax_rows, session, all_sources_by_priority,
             var_ids["temperature_2m"], day, day,
         )
         day_row = single_day_rows[0] if single_day_rows else None
@@ -342,7 +412,7 @@ async def build_recommendations(session: AsyncSession, parcel: Parcel, day: date
                     }
                 )
     elif forecast_source is not None:
-        window_start = _utc((last_era5_date + timedelta(days=1)) if last_era5_date else day)
+        window_start = _utc((last_historical_date + timedelta(days=1)) if last_historical_date else day)
         window_end = _utc(day + timedelta(days=1))
         variable_codes_needed = {
             "leaf_wetness_inputs": [
@@ -427,11 +497,15 @@ async def build_recommendations(session: AsyncSession, parcel: Parcel, day: date
     # --- Balance hídrico (no es una amenaza catalogada: indicador general) ---
     water_balance_out = None
     precip_rows = await _combined_daily(
-        _daily_sum_rows, session, era5_source, forecast_source, last_era5_date,
+        _daily_sum_rows, session, all_sources_by_priority,
         var_ids["precipitation"], day - timedelta(days=WATER_BALANCE_LOOKBACK_DAYS), day,
     )
+    # ET0 sigue viniendo solo de ERA5-Land/previsión: el adaptador RIA no mapea
+    # su radiación/ET0 (unidades no verificadas, ver services/ria_client.py),
+    # así que aquí NO se incluye ria_source aunque exista.
+    et0_sources = await _sources_by_priority(session, [era5_source, forecast_source])
     et0_rows = await _combined_daily(
-        _daily_sum_rows, session, era5_source, forecast_source, last_era5_date,
+        _daily_sum_rows, session, et0_sources,
         var_ids["et0_fao_evapotranspiration"], day - timedelta(days=WATER_BALANCE_LOOKBACK_DAYS), day,
     )
     precip_by_day = {row.day: row.total for row in precip_rows}

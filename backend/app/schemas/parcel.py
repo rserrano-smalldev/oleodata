@@ -29,6 +29,7 @@ class ParcelOut(BaseModel):
     sensorization_status: str
     created_at: datetime
     initial_backfill_note: str | None = None
+    ria_note: str | None = None
 
     model_config = {"from_attributes": True}
 

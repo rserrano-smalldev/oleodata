@@ -50,6 +50,28 @@ async def init_db(engine: AsyncEngine) -> None:
         # existentes que vengan de antes de añadir el proveedor de previsión.
         await conn.execute(text("ALTER TYPE provider_type ADD VALUE IF NOT EXISTS 'forecast'"))
 
+        # Igual que con el ENUM anterior: create_all() no altera una tabla
+        # `station` que ya existía de una versión anterior del esquema (antes
+        # de que RIA necesitara un UNIQUE (provider_id, code) para poder
+        # cachear su listado de estaciones de forma idempotente). El bloque
+        # DO comprueba pg_constraint antes de añadirla, así que es seguro
+        # ejecutarlo en cada arranque tanto en bases nuevas como existentes.
+        await conn.execute(
+            text(
+                """
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint WHERE conname = 'uq_station_provider_code'
+                    ) THEN
+                        ALTER TABLE station
+                            ADD CONSTRAINT uq_station_provider_code UNIQUE (provider_id, code);
+                    END IF;
+                END $$;
+                """
+            )
+        )
+
         await conn.execute(text(EFFECTIVE_DISTANCE_FUNCTION_SQL))
 
         await conn.execute(
