@@ -208,10 +208,10 @@ async def test_fetch_daily_range_resilient_gives_up_cleanly_when_everything_is_4
         FakeAdapter(), 14, 102, date(2018, 1, 1), date(2023, 1, 1)
     )
     assert result == []
-    # Con RIA_MAX_RETRY_SHRINKS bajo, el número de peticiones para un solo
-    # bloque debe quedarse en un puñado, nunca en cientos (día a día durante
-    # años).
-    assert len(calls) < 20
+    # Con RIA_MAX_RETRY_SHRINKS acotado, el número de peticiones para un solo
+    # bloque debe quedarse en unas pocas decenas como mucho, nunca en cientos
+    # (día a día durante años).
+    assert len(calls) < 40
 
 
 async def test_ensure_ria_stations_cached_decodes_real_dmsh_coordinate_format(db_session):

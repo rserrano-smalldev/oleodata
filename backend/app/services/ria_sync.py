@@ -63,16 +63,16 @@ from app.services.sources import get_or_create_source, get_provider_by_code
 logger = logging.getLogger(__name__)
 
 RIA_CHUNK_YEARS = 1  # bloques de 2 años daban 400 Bad Request; con 1 año se ha visto menos, pero no es garantía
-# Tope BAJO a propósito: un 400 puede deberse a que la estación simplemente
-# no tiene datos en ese periodo (no solo a que el rango sea demasiado
-# grande). Si se permite seguir partiendo indefinidamente, un fallo
-# sistemático de la estación entera acaba intentando día por día durante
-# años — cientos de peticiones reales e inútiles a la API de la Junta de
-# Andalucía. Con 2, como mucho se intentan unas pocas particiones antes de
-# rendirse en ese bloque (ver también el "circuit breaker" de bloques
-# consecutivos sin datos en _fetch_and_store_ria_range).
-RIA_MAX_RETRY_SHRINKS = 2
-RIA_MAX_CONSECUTIVE_EMPTY_CHUNKS = 2  # bloques de nivel superior sin NINGÚN dato antes de abortar del todo
+# Un 400 puede deberse tanto a un rango demasiado grande como a que la
+# estación tenga un hueco real de datos en parte de ese periodo (confirmado:
+# IFAPA Hinojosa del Duque tenía huecos en 2022 pero SÍ tiene histórico real
+# desde 2006). Con un tope de particiones demasiado bajo (probado con 2:
+# como mucho cuartos de año), un hueco de unas semanas hacía fallar el
+# CUARTO entero que lo contenía, perdiendo meses de datos buenos que sí
+# existían alrededor. 4 permite aislar huecos de unas pocas semanas sin
+# descartar el resto del año, manteniendo el peor caso acotado (como mucho
+# 1+2+4+8+16 = 31 peticiones por bloque de RIA_CHUNK_YEARS, nunca cientos).
+RIA_MAX_RETRY_SHRINKS = 4
 RIA_LATENCY_DAYS = 1  # sin confirmar oficialmente cuánto tarda RIA en publicar el día en curso
 INSERT_BATCH_SIZE = 5000
 
@@ -415,33 +415,20 @@ async def _fetch_and_store_ria_range(
     adapter = adapter or RIAAdapter()
     total_days = 0
     total_written = 0
-    consecutive_empty_chunks = 0
+    empty_chunks = 0
 
     for chunk_start, chunk_end in _iter_year_chunks(start_date, end_date):
         logger.info("RIA source=%s estación=%s: bloque %s -> %s", source.code, station.code, chunk_start, chunk_end)
         daily_rows = await _fetch_daily_range_resilient(
             adapter, int(provincia_id), int(codigo_estacion), chunk_start, chunk_end
         )
-
         if not daily_rows:
-            consecutive_empty_chunks += 1
-            if consecutive_empty_chunks >= RIA_MAX_CONSECUTIVE_EMPTY_CHUNKS:
-                # Circuit breaker: un 400 puede ser "la estación no tiene
-                # datos en este periodo" tanto como "el rango es demasiado
-                # grande". Si varios bloques seguidos no traen NINGÚN día,
-                # seguir troceando el resto del histórico (a veces años)
-                # solo generaría cientos de peticiones reales inútiles a la
-                # API de la Junta de Andalucía. Se detiene aquí con lo que
-                # ya se haya conseguido, en vez de agotar el resto del rango.
-                logger.error(
-                    "RIA source=%s estación=%s: %d bloques consecutivos sin ningún dato — "
-                    "se detiene la sincronización aquí (probablemente esta estación no tiene "
-                    "histórico disponible por esta vía para el resto del rango pedido).",
-                    source.code, station.code, consecutive_empty_chunks,
-                )
-                break
-        else:
-            consecutive_empty_chunks = 0
+            # No se aborta el resto del rango por esto: un bloque vacío
+            # (huecos reales de la estación, o un 400 que ni particionando
+            # se resolvió) no dice nada sobre los demás bloques — se
+            # comprobó en producción que un año con huecos parciales no
+            # implica que los años siguientes también carezcan de datos.
+            empty_chunks += 1
 
         rows = []
         for day_payload in daily_rows:
@@ -460,6 +447,13 @@ async def _fetch_and_store_ria_range(
             await session.execute(stmt)
             total_written += len(batch)
         await session.commit()
+
+    if empty_chunks:
+        logger.warning(
+            "RIA source=%s estación=%s: %d de los bloques pedidos no trajeron ningún día "
+            "(huecos reales de la estación, o 400 persistente incluso particionando).",
+            source.code, station.code, empty_chunks,
+        )
 
     return total_days, total_written
 

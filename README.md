@@ -299,20 +299,28 @@ desarrollo). API pública, sin API key, solo cubre Andalucía.
 - **400 Bad Request en `datosdiarios` (no siempre es el tamaño del rango)**:
   pedir ~2 años de golpe devuelve 400. Pero al probarlo con una estación
   real concreta (IFAPA Hinojosa del Duque, cerca de la finca de
-  referencia), se confirmó que un 400 **también puede significar que esa
-  estación no tiene datos en ese periodo**, ni siquiera para un solo día —
-  no es solo un límite de tamaño. Por eso `_fetch_daily_range_resilient`
-  parte el rango en dos y reintenta cada mitad, pero con un tope BAJO
-  (`RIA_MAX_RETRY_SHRINKS = 2`) y sin propagar nunca el 400 hacia arriba:
-  la primera versión de este arreglo no tenía tope real y, al toparse con
-  una estación que rechazaba todo, acababa troceando día a día durante
-  años enteros — cientos de peticiones reales e inútiles a la API de la
-  Junta de Andalucía antes de responder. Además, `_fetch_and_store_ria_range`
-  tiene un "circuit breaker": si varios bloques anuales seguidos
-  (`RIA_MAX_CONSECUTIVE_EMPTY_CHUNKS`) no traen NINGÚN dato, se detiene ahí
-  con lo que ya se haya conseguido en vez de agotar el resto del rango
-  pedido. Solo un error que no sea 400 (fallo de red, 5xx) se sigue
-  propagando de verdad, porque ese sí es inesperado.
+  referencia, con histórico real desde al menos 2006), se confirmó que un
+  400 **también puede significar que esa estación tiene un hueco real de
+  datos en parte del periodo pedido** — se vio un hueco real en 2022 que
+  no implicaba que el resto del histórico (incluidos años posteriores)
+  también faltara. Por eso `_fetch_daily_range_resilient` parte el rango
+  en dos y reintenta cada mitad, con un tope acotado
+  (`RIA_MAX_RETRY_SHRINKS = 4`, suficiente para aislar huecos de unas
+  semanas sin descartar el año entero) y sin propagar nunca el 400 hacia
+  arriba — la primera versión de este arreglo no tenía tope real y, al
+  toparse con un hueco, acababa troceando día a día durante años enteros
+  (cientos de peticiones reales e inútiles a la API de la Junta de
+  Andalucía). Una segunda versión añadía además un "circuit breaker" que
+  abortaba el resto de la sincronización si varios bloques anuales
+  seguidos salían vacíos — **se quitó**, porque un año con huecos no dice
+  nada sobre si los años siguientes tienen datos buenos (como pasó en la
+  práctica), así que abortar por eso perdía histórico real que sí
+  existía. Ahora simplemente se sigue con el resto de bloques, y solo un
+  error que no sea 400 (fallo de red, 5xx) se propaga de verdad. Limitación
+  conocida: la sincronización incremental (`sync_parcel_ria`) avanza desde
+  el último dato guardado, así que un hueco al principio del histórico no
+  se reintenta automáticamente en sincronizaciones futuras (solo avanza
+  hacia adelante, no rellena huecos hacia atrás).
 - El motor de recomendaciones (`app/services/agronomy/engine.py`) combina
   RIA + ERA5-Land + previsión con el mismo criterio de prioridad genérico
   que ya usa `/daily` (`app/services/daily_series.py`): para cada día gana

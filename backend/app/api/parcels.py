@@ -416,8 +416,8 @@ async def ria_sync(parcel_id: int, session: AsyncSession = Depends(get_session))
             if summary.already_up_to_date
             else f"Histórico diario REAL de la estación RIA importado ({summary.days_fetched} días), "
             "usado con prioridad sobre ERA5-Land en las recomendaciones (estación real > reanálisis). "
-            "Si la estación no tenía datos para todo el rango pedido, la sincronización se detiene "
-            "pronto en vez de agotar peticiones — repite la llamada más tarde para completar lo que falte."
+            "Si la estación tenía huecos reales de datos en parte del rango, esos días concretos "
+            "quedan sin importar (la sincronización sigue con el resto en vez de fallar entera)."
         ),
     }
 
