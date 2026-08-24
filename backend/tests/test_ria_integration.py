@@ -14,6 +14,7 @@ desarrollo): se inyecta un RIAAdapter falso con datos de ejemplo.
 
 from datetime import date, timedelta
 
+import httpx
 from geoalchemy2 import WKTElement
 from sqlalchemy import delete, select
 
@@ -26,6 +27,7 @@ from app.services.backfill import _ensure_era5_source
 from app.services.ria_sync import (
     RIA_LATENCY_DAYS,
     NearbyStation,
+    _fetch_daily_range_resilient,
     _parse_dmsh_coord,
     ensure_ria_stations_cached,
     find_nearby_ria_station,
@@ -148,6 +150,31 @@ def test_parse_dmsh_coord_matches_meteospain_formula():
     # la fórmula de meteospain.
     assert round(_parse_dmsh_coord("375951000N"), 4) == round(37.9975, 4)
     assert round(_parse_dmsh_coord("042643000W"), 4) == round(-4.445277777777778, 4)
+
+
+async def test_fetch_daily_range_resilient_splits_on_400_bad_request():
+    """Bug real: pedir ~2 años de golpe a datosdiarios da 400 Bad Request (el
+    límite real de rango por petición no está documentado). El wrapper debe
+    partir el rango en dos y reintentar cada mitad en vez de tirar la
+    sincronización entera con un 500."""
+    calls = []
+
+    async def fake_fetch(provincia_id, codigo_estacion, start_date, end_date):
+        calls.append((start_date, end_date))
+        if (end_date - start_date).days > 10:
+            request = httpx.Request("GET", "http://test/datosdiarios")
+            response = httpx.Response(400, request=request)
+            raise httpx.HTTPStatusError("Bad Request", request=request, response=response)
+        return [{"fecha": start_date.isoformat()}]
+
+    class FakeAdapter:
+        fetch_daily_range = staticmethod(fake_fetch)
+
+    result = await _fetch_daily_range_resilient(
+        FakeAdapter(), 14, 102, date(2020, 1, 1), date(2021, 12, 31)
+    )
+    assert len(calls) > 1  # tuvo que partir el rango al menos una vez
+    assert isinstance(result, list) and len(result) > 0
 
 
 async def test_ensure_ria_stations_cached_decodes_real_dmsh_coordinate_format(db_session):

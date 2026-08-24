@@ -296,6 +296,14 @@ desarrollo). API pública, sin API key, solo cubre Andalucía.
   diario. Esto reproduce el mínimo/máximo diario exactos, pero una media
   calculada sobre esos 3 puntos es una aproximación. Documentado en la
   cabecera de `app/services/ria_sync.py`.
+- **Límite de rango por petición (no documentado oficialmente)**: pedir
+  `datosdiarios` con un rango de ~2 años de una vez devuelve `400 Bad
+  Request` (confirmado en producción). Se troceó a 1 año por petición
+  (`RIA_CHUNK_YEARS`), y además `_fetch_daily_range_resilient` parte el
+  rango en dos y reintenta cada mitad si aun así llega un 400 (hasta
+  `RIA_MAX_RETRY_SHRINKS` veces): es preferible histórico parcial a que
+  toda la sincronización de una parcela falle con un 500 por un límite de
+  la API que no está publicado en ningún sitio.
 - El motor de recomendaciones (`app/services/agronomy/engine.py`) combina
   RIA + ERA5-Land + previsión con el mismo criterio de prioridad genérico
   que ya usa `/daily` (`app/services/daily_series.py`): para cada día gana

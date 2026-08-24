@@ -381,7 +381,25 @@ async def ria_sync(parcel_id: int, session: AsyncSession = Depends(get_session))
             ),
         }
 
-    summary = await sync_parcel_ria(session, parcel, nearby)
+    try:
+        summary = await sync_parcel_ria(session, parcel, nearby)
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "No se pudo traer el histórico de la estación RIA %s para %s: %s",
+            nearby.station.code, parcel.code, exc,
+        )
+        return {
+            "station_found": True,
+            "cached_station_count": cached_station_count,
+            "station_code": nearby.station.code,
+            "station_name": nearby.station.name,
+            "horizontal_km": round(nearby.horizontal_km, 2),
+            "note": (
+                f"Se encontró la estación real '{nearby.station.name}' a "
+                f"{nearby.horizontal_km:.1f} km, pero no se pudo traer su histórico "
+                "diario (fallo de red o de la API de RIA). Reintenta más tarde."
+            ),
+        }
     return {
         "station_found": True,
         "cached_station_count": cached_station_count,

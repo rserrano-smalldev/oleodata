@@ -47,6 +47,7 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 
+import httpx
 from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -61,7 +62,8 @@ from app.services.sources import get_or_create_source, get_provider_by_code
 
 logger = logging.getLogger(__name__)
 
-RIA_CHUNK_YEARS = 2  # sin documentación oficial verificada del límite de rango por petición: prudente
+RIA_CHUNK_YEARS = 1  # la API real devuelve 400 Bad Request con bloques de 2 años; 1 año funciona
+RIA_MAX_RETRY_SHRINKS = 10  # suficiente para poder llegar a partir hasta un solo día si hiciera falta
 RIA_LATENCY_DAYS = 1  # sin confirmar oficialmente cuánto tarda RIA en publicar el día en curso
 INSERT_BATCH_SIZE = 5000
 
@@ -339,6 +341,47 @@ def _synthetic_rows_for_day(day: date, fields: dict, variable_ids: dict[str, int
     return rows
 
 
+async def _fetch_daily_range_resilient(
+    adapter: RIAAdapter,
+    provincia_id: int,
+    codigo_estacion: int,
+    start_date: date,
+    end_date: date,
+    depth: int = 0,
+) -> list[dict]:
+    """Como `RIAAdapter.fetch_daily_range`, pero si la API responde 400 Bad
+    Request (el límite real de rango por petición no está documentado: 2
+    años ya lo dispara, ver RIA_CHUNK_YEARS) parte el rango por la mitad y
+    reintenta cada mitad, hasta RIA_MAX_RETRY_SHRINKS veces. Si un tramo
+    sigue fallando en el último nivel, se salta ese tramo concreto (con un
+    aviso) en vez de perder todo el bloque: es preferible histórico
+    incompleto y declarado a un 500 que tira toda la sincronización.
+    """
+    try:
+        return await adapter.fetch_daily_range(provincia_id, codigo_estacion, start_date, end_date)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 400 or start_date >= end_date or depth >= RIA_MAX_RETRY_SHRINKS:
+            if start_date >= end_date:
+                logger.warning(
+                    "RIA: %s/%s sigue devolviendo 400 incluso para un solo día (%s), se omite.",
+                    provincia_id, codigo_estacion, start_date,
+                )
+                return []
+            raise
+        midpoint = start_date + (end_date - start_date) / 2
+        logger.warning(
+            "RIA: %s/%s devolvió 400 para %s -> %s, se parte en %s -> %s y %s -> %s.",
+            provincia_id, codigo_estacion, start_date, end_date, start_date, midpoint, midpoint + timedelta(days=1), end_date,
+        )
+        first_half = await _fetch_daily_range_resilient(
+            adapter, provincia_id, codigo_estacion, start_date, midpoint, depth + 1
+        )
+        second_half = await _fetch_daily_range_resilient(
+            adapter, provincia_id, codigo_estacion, midpoint + timedelta(days=1), end_date, depth + 1
+        )
+        return first_half + second_half
+
+
 async def _fetch_and_store_ria_range(
     session: AsyncSession,
     source: Source,
@@ -363,8 +406,8 @@ async def _fetch_and_store_ria_range(
 
     for chunk_start, chunk_end in _iter_year_chunks(start_date, end_date):
         logger.info("RIA source=%s estación=%s: bloque %s -> %s", source.code, station.code, chunk_start, chunk_end)
-        daily_rows = await adapter.fetch_daily_range(
-            int(provincia_id), int(codigo_estacion), chunk_start, chunk_end
+        daily_rows = await _fetch_daily_range_resilient(
+            adapter, int(provincia_id), int(codigo_estacion), chunk_start, chunk_end
         )
 
         rows = []
