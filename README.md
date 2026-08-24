@@ -68,8 +68,11 @@ porque ERA5-Land es global.
 ## Stack
 
 - Backend: Python 3.12, FastAPI, SQLAlchemy 2.x async (asyncpg), GeoAlchemy2.
-- Base de datos: PostgreSQL 16 + TimescaleDB + PostGIS (imagen propia en `db/Dockerfile`,
-  porque no existe un tag oficial estable que combine ambas extensiones).
+- Base de datos: PostgreSQL 16 + TimescaleDB + PostGIS, imagen oficial
+  `timescale/timescaledb-ha:pg16-all-oss` (la variante "-all" trae PostGIS
+  ya instalado junto con TimescaleDB; es la combinación mantenida
+  oficialmente por Timescale, el repositorio `timescale/timescaledb-postgis`
+  quedó descontinuado).
 - Sin Alembic: el esquema se crea de forma **idempotente** en el arranque de
   la API (`app/bootstrap.py`, `CREATE ... IF NOT EXISTS` / `ON CONFLICT DO
   NOTHING` en todas partes). Es una decisión deliberada para un MVP que

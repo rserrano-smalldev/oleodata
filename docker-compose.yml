@@ -2,8 +2,12 @@ name: oleodata
 
 services:
   db:
-    build:
-      context: ./db
+    # Imagen oficial de TimescaleDB que ya trae PostGIS incluido (variante
+    # "-all-oss"): no existe un tag combinado más ligero mantenido, y
+    # construir una imagen propia con apt-get sobre timescale/timescaledb
+    # dejó de funcionar porque esa imagen base ya no incluye apt (ver
+    # db/README.md si se quiere reconstruir esta decisión).
+    image: timescale/timescaledb-ha:pg16-all-oss
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-oleodata}
@@ -12,7 +16,7 @@ services:
     ports:
       - "${DB_PORT:-5480}:5432"
     volumes:
-      - oleodata_pgdata:/var/lib/postgresql/data
+      - oleodata_pgdata:/home/postgres/pgdata
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-oleodata} -d ${POSTGRES_DB:-oleodata}"]
       interval: 5s
