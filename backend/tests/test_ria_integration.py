@@ -43,6 +43,7 @@ FAR_STATION_CODE = "TEST-RIA-FAR"  # a >15 km del punto de referencia
 # código de test numérico distinto, usado solo por el test de sincronización.
 NUMERIC_TEST_STATION_CODE = "9001"
 TEST_PROVINCIA_ID = 5  # Córdoba, usada por todos los fixtures de este fichero
+OTHER_TEST_PROVINCIA_ID = 14  # provincia distinta, para el test de colisión entre provincias
 _PLAIN_TEST_STATION_CODES = [NEAR_STATION_CODE, FAR_STATION_CODE, NUMERIC_TEST_STATION_CODE]
 # ensure_ria_stations_cached guarda `code` como "{provincia_id}:{codigoEstacion}"
 # (ver services/ria_sync.py: codigoEstacion no es único en toda la red RIA,
@@ -51,7 +52,7 @@ _PLAIN_TEST_STATION_CODES = [NEAR_STATION_CODE, FAR_STATION_CODE, NUMERIC_TEST_S
 # plano. La limpieza entre tests tiene que borrar ambas formas.
 ALL_TEST_STATION_CODES = _PLAIN_TEST_STATION_CODES + [
     f"{TEST_PROVINCIA_ID}:{code}" for code in _PLAIN_TEST_STATION_CODES
-]
+] + [f"{OTHER_TEST_PROVINCIA_ID}:{code}" for code in _PLAIN_TEST_STATION_CODES]
 
 
 class FakeRIAAdapter:
@@ -231,6 +232,69 @@ async def test_ensure_ria_stations_cached_deduplicates_repeated_station_codes(db
     count = await ensure_ria_stations_cached(db_session, adapter=fake)
     assert count == 1  # una sola fila física, no 2
 
+    await _clean_ria_test_fixtures(db_session)
+
+
+async def test_ensure_ria_stations_cached_keeps_same_codigo_estacion_in_different_provinces(db_session):
+    """Bug real reportado por el usuario: IFAPA Hinojosa del Duque (provincia
+    14, codigoEstacion 102, confirmado en la web oficial de RIA en
+    /riaweb/web/estacion/14/102) nunca se cacheaba porque otra estación de
+    OTRA provincia también tenía codigoEstacion 102, y `station.code`
+    guardaba solo el codigoEstacion — el UNIQUE (provider_id, code)
+    descartaba la segunda en silencio. codigoEstacion solo es único DENTRO
+    de su provincia, no en toda la red RIA."""
+    await _clean_ria_test_fixtures(db_session)
+
+    same_code = "102"
+    fake = FakeRIAAdapter(
+        stations=[
+            {
+                "codigoEstacion": same_code,
+                "nombre": "Huéneja (otra provincia, mismo código)",
+                "provincia_id": TEST_PROVINCIA_ID,
+                "provincia_nombre": "Córdoba",
+                "altitud": 500,
+                "latitud": PARCEL_LAT + 0.01,
+                "longitud": PARCEL_LON,
+                "bajoplastico": False,
+            },
+            {
+                "codigoEstacion": same_code,
+                "nombre": "IFAPA Hinojosa del Duque (test)",
+                "provincia_id": OTHER_TEST_PROVINCIA_ID,
+                "provincia_nombre": "Córdoba",
+                "altitud": 608,
+                "latitud": PARCEL_LAT + 0.02,
+                "longitud": PARCEL_LON,
+                "bajoplastico": False,
+            },
+        ]
+    )
+
+    count = await ensure_ria_stations_cached(db_session, adapter=fake)
+    assert count == 2  # las DOS deben sobrevivir: son estaciones distintas
+
+    codes = set(
+        (
+            await db_session.execute(
+                select(Station.code).where(
+                    Station.code.in_(
+                        [f"{TEST_PROVINCIA_ID}:{same_code}", f"{OTHER_TEST_PROVINCIA_ID}:{same_code}"]
+                    )
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert codes == {f"{TEST_PROVINCIA_ID}:{same_code}", f"{OTHER_TEST_PROVINCIA_ID}:{same_code}"}
+
+    await db_session.execute(
+        delete(Station).where(
+            Station.code.in_([f"{TEST_PROVINCIA_ID}:{same_code}", f"{OTHER_TEST_PROVINCIA_ID}:{same_code}"])
+        )
+    )
+    await db_session.commit()
     await _clean_ria_test_fixtures(db_session)
 
 
