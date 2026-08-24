@@ -2,7 +2,7 @@
 
 - caché de estaciones reales (idempotente, sin volver a llamar a la red si
   ya hay estaciones cacheadas)
-- regla "estación a menos de 10 km" (distancia puramente horizontal)
+- regla "estación a menos de 15 km" (distancia puramente horizontal)
 - sincronización de histórico diario por parcela, con la convención de 3
   puntos sintéticos por día para temperatura/humedad
 - preferencia de RIA sobre ERA5-Land en el motor de recomendaciones cuando
@@ -17,6 +17,7 @@ from datetime import date, timedelta
 from geoalchemy2 import WKTElement
 from sqlalchemy import delete, select
 
+from app.config import get_settings
 from app.models.catalog import Station, Variable
 from app.models.parcel import Parcel
 from app.models.timeseries import Observation, Source
@@ -37,7 +38,7 @@ TEST_PARCEL_CODE = "TEST-RIA-INTEGRATION-PARCEL"
 PARCEL_LAT, PARCEL_LON = 38.521823062719164, -5.159543633627551
 
 NEAR_STATION_CODE = "TEST-RIA-NEAR"  # a ~2 km del punto de referencia
-FAR_STATION_CODE = "TEST-RIA-FAR"  # a >10 km del punto de referencia
+FAR_STATION_CODE = "TEST-RIA-FAR"  # a >15 km del punto de referencia
 # codigoEstacion real de RIA es numérico (ver docstring de ria_client.py): un
 # código de test numérico distinto, usado solo por el test de sincronización.
 NUMERIC_TEST_STATION_CODE = "9001"
@@ -104,6 +105,13 @@ async def _ensure_test_parcel(session) -> Parcel:
     return parcel
 
 
+def test_ria_max_distance_default_is_15km():
+    """Regresión: el usuario pidió explícitamente ampliar el radio de 10 a
+    15 km tras comprobar que la estación real más cercana a la finca de
+    referencia quedaba justo fuera de los 10 km."""
+    assert get_settings().ria_max_distance_km == 15.0
+
+
 def test_parse_dmsh_coord_matches_meteospain_formula():
     """La API real de `estaciones` da latitud/longitud en formato empaquetado
     "DDMMSSsssH" (grados, minutos, segundos×1000, hemisferio), NO en grados
@@ -159,7 +167,7 @@ async def test_ensure_ria_stations_cached_decodes_real_dmsh_coordinate_format(db
     expected_lat = 38 + 28 / 60 + 52 / 3600
     expected_lon = -(5 + 8 / 60 + 26 / 3600)
 
-    # A ~10 km del punto real, debe encontrarse (la parcela de referencia
+    # A ~15 km del punto real, debe encontrarse (la parcela de referencia
     # del README está a pocos km de Hinojosa del Duque).
     nearby = await find_nearby_ria_station(db_session, expected_lat, expected_lon, max_km=1.0)
     assert nearby is not None
@@ -223,7 +231,7 @@ async def test_ensure_ria_stations_cached_is_idempotent_and_does_not_refetch(db_
     await _clean_ria_test_fixtures(db_session)
 
 
-async def test_find_nearby_ria_station_uses_pure_horizontal_10km_rule(db_session):
+async def test_find_nearby_ria_station_uses_pure_horizontal_15km_rule(db_session):
     provider = await _clean_ria_test_fixtures(db_session)
 
     near = Station(

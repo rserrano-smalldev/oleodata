@@ -73,7 +73,7 @@ def _parcel_to_out(
 
 
 async def _try_auto_ria_sync(session: AsyncSession, parcel: Parcel) -> str | None:
-    """Si hay una estación RIA real a menos de `ria_max_distance_km` (10 km
+    """Si hay una estación RIA real a menos de `ria_max_distance_km` (15 km
     por defecto), la cachea/usa automáticamente. Nunca falla la creación de
     la parcela si la red de RIA no responde: se degrada a una nota, igual
     que ya se hace con ERA5-Land."""
@@ -344,7 +344,7 @@ async def backfill_sync(parcel_id: int, session: AsyncSession = Depends(get_sess
 @router.post("/{parcel_id}/ria/sync")
 async def ria_sync(parcel_id: int, session: AsyncSession = Depends(get_session)):
     """Comprueba (o vuelve a comprobar) si hay una estación RIA real a menos
-    de `ria_max_distance_km` (10 km por defecto) y trae/actualiza su
+    de `ria_max_distance_km` (15 km por defecto) y trae/actualiza su
     histórico diario real. A diferencia de ERA5-Land, RIA solo cubre
     Andalucía: si no hay ninguna estación cerca, la respuesta lo declara
     explícitamente en vez de fingir cobertura.

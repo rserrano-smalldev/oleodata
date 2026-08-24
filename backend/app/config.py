@@ -32,8 +32,10 @@ class Settings(BaseSettings):
     ria_base_url: str = "https://www.juntadeandalucia.es"
     # Regla de negocio específica de RIA (no la del descubrimiento genérico
     # anterior): usar automáticamente una estación real solo si está a menos
-    # de esta distancia HORIZONTAL, tal cual lo pidió el usuario.
-    ria_max_distance_km: float = 10.0
+    # de esta distancia HORIZONTAL, tal cual lo pidió el usuario (ampliado
+    # de 10 a 15 km tras comprobar que la estación real más cercana a la
+    # finca de referencia quedaba justo fuera de los 10 km).
+    ria_max_distance_km: float = 15.0
 
     # Variables consideradas críticas para los modelos agronómicos: si ninguna
     # fuente descubierta las cubre, la API debe declararlo explícitamente.

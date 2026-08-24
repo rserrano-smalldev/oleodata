@@ -37,7 +37,7 @@ services:
       INITIAL_BACKFILL_YEARS_BACK: ${INITIAL_BACKFILL_YEARS_BACK:-5}
       FORECAST_DAYS_AHEAD: ${FORECAST_DAYS_AHEAD:-7}
       RIA_BASE_URL: ${RIA_BASE_URL:-https://www.juntadeandalucia.es}
-      RIA_MAX_DISTANCE_KM: ${RIA_MAX_DISTANCE_KM:-10}
+      RIA_MAX_DISTANCE_KM: ${RIA_MAX_DISTANCE_KM:-15}
     ports:
       - "${API_PORT:-8420}:8000"
     depends_on:

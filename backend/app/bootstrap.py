@@ -10,12 +10,15 @@ el desarrollo, nunca duplica nada ni falla por "ya existe".
 
 import logging
 
+import httpx
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.db import Base
+from app.db import Base, SessionLocal
 from app.models import *  # noqa: F401,F403  (registra las tablas en Base.metadata)
 from app.seed.run import seed_all
+from app.services.ria_client import RIAAdapter
+from app.services.ria_sync import ensure_ria_stations_cached
 
 logger = logging.getLogger(__name__)
 
@@ -82,4 +85,29 @@ async def init_db(engine: AsyncEngine) -> None:
         )
 
     await seed_all(engine)
+
+    # Caché EAGER del listado real de estaciones RIA: se hace aquí, en el
+    # arranque de la API, para que la tabla `station` ya esté poblada "desde
+    # el principio" y no dependa de que alguien dé de alta o sincronice una
+    # parcela primero (pedido explícito del usuario, tras comprobar que la
+    # caché perezosa nunca llegaba a dispararse a tiempo). ensure_ria_stations_cached
+    # ya es idempotente — no vuelve a llamar a la red si ya hay estaciones
+    # cacheadas —, así que en arranques posteriores esto es solo una consulta
+    # COUNT(*). Nunca bloquea el arranque de la API si RIA no responde
+    # (docker sin salida a internet, mantenimiento de la Junta de Andalucía,
+    # timeout corto para no alargar el arranque): se degrada a un aviso en
+    # el log, igual que el resto de llamadas a APIs externas de este MVP; se
+    # reintentará automáticamente al dar de alta o sincronizar una parcela.
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            async with SessionLocal() as session:
+                station_count = await ensure_ria_stations_cached(session, adapter=RIAAdapter(client=client))
+        logger.info("RIA: %d estaciones reales cacheadas (o ya existentes) en el arranque.", station_count)
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "RIA: no se pudo cachear el listado de estaciones en el arranque (%s). "
+            "Se reintentará al dar de alta o sincronizar una parcela.",
+            exc,
+        )
+
     logger.info("Base de datos inicializada (extensiones, esquema, función SQL, hypertable, seed).")

@@ -79,7 +79,7 @@ PROVIDERS = [
             "desarrollo: no se mapean, para no inventar una conversión. El balance hídrico "
             "sigue usando ET0 de ERA5-Land/previsión aunque la parcela tenga estación RIA "
             "cerca. Solo se usa automáticamente para una parcela si hay una estación real a "
-            "menos de 10 km (ver app/services/ria_sync.py)."
+            "menos de 15 km (ver app/services/ria_sync.py)."
         ),
     },
     {

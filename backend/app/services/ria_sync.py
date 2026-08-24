@@ -8,7 +8,7 @@ Tres responsabilidades separadas:
   `station` (idempotente vía el UNIQUE (provider_id, code) de bootstrap.py).
   No se vuelve a pedir a la red si ya hay estaciones cacheadas.
 - `find_nearby_ria_station`: regla de negocio ESPECÍFICA de RIA pedida por
-  el usuario ("estación a menos de 10 km"), distancia puramente horizontal
+  el usuario ("estación a menos de 15 km"), distancia puramente horizontal
   (ST_Distance sobre geography), deliberadamente NO la `effective_distance_km`
   ponderada por desnivel que usa el descubrimiento genérico del módulo 2:
   aquí se implementa literalmente el umbral que se pidió, no se reutiliza
@@ -39,7 +39,7 @@ ver `_parse_dmsh_coord` más abajo); `float()` sobre ese texto lanza
 ValueError, que quedaba silenciosamente atrapado como "campo incompleto" —
 así que NINGUNA estación se llegaba a cachear nunca, y por eso
 `find_nearby_ria_station` no encontraba ninguna aunque existiera una
-estación real a menos de 10 km (p.ej. IFAPA Hinojosa del Duque, Córdoba).
+estación real a menos de 15 km (p.ej. IFAPA Hinojosa del Duque, Córdoba).
 """
 
 import logging
@@ -204,7 +204,7 @@ async def find_nearby_ria_station(
     session: AsyncSession, lat: float, lon: float, max_km: float | None = None
 ) -> NearbyStation | None:
     """Estación RIA real más cercana a (lat, lon), o None si ninguna está a
-    menos de `max_km` (por defecto settings.ria_max_distance_km = 10 km).
+    menos de `max_km` (por defecto settings.ria_max_distance_km = 15 km).
 
     Distancia puramente horizontal, deliberadamente sin el ajuste por
     desnivel de `effective_distance_km` (ver docstring del módulo).

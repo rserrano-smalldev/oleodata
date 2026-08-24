@@ -31,7 +31,7 @@ producto fitosanitario en cualquier texto de respuesta.
 | Previsión de los próximos 7 días | **REAL** | Open-Meteo Forecast API, sin API key. Se reemplaza por completo cada vez que se refresca (no se acumula como el histórico). Usada por el motor de recomendaciones para días futuros. |
 | Altitud de la parcela | **REAL** | API de elevación de Open-Meteo, resuelta en el alta de la parcela (nunca hardcodeada). |
 | Lecturas de sensor de parcela (temperatura, precipitación, humectación foliar) a resolución de 15 min | **100% SIMULADO** | No hay hardware instalado. Ver [módulo 3](#módulo-3--simulador-de-sensores). Etiquetado como tal en BD (`source.is_simulated`, `data_provider.type='simulated_sensor'`), en la API (`is_simulated: true`) y en la interfaz (badge naranja "SIMULADO"). |
-| Estación RIA (Red de Información Agroclimática de Andalucía) | **REAL, solo si hay una estación a &lt;10 km** | API pública de la Junta de Andalucía, sin API key. Ver [RIA](#red-de-información-agroclimática-de-andalucía-ria). Si hay una estación real cerca, su histórico diario se usa con prioridad sobre ERA5-Land (estación real > reanálisis). Solo cubre Andalucía. No mide humectación foliar; su radiación/ET0 no se mapean (unidades no verificadas). |
+| Estación RIA (Red de Información Agroclimática de Andalucía) | **REAL, solo si hay una estación a &lt;15 km** | API pública de la Junta de Andalucía, sin API key. Ver [RIA](#red-de-información-agroclimática-de-andalucía-ria). Si hay una estación real cerca, su histórico diario se usa con prioridad sobre ERA5-Land (estación real > reanálisis). Solo cubre Andalucía. No mide humectación foliar; su radiación/ET0 no se mapean (unidades no verificadas). |
 | Redes de estaciones regionales (AEMET, SIAR) | **NO IMPLEMENTADO** | Catalogadas en `data_provider` con `has_adapter=false` para que la arquitectura las soporte sin migrar nada, pero no aportan ningún dato en este MVP. |
 | Umbrales de los modelos agronómicos (GDD, repilo, helada, Kc) | **Valores de partida de literatura general** | No calibrados con datos de campo de ninguna explotación real. Ver [módulo 4](#módulo-4--modelos-agronómicos). |
 | Susceptibilidad varietal | **Caracterización de bibliografía divulgativa, no citas primarias verificadas línea a línea** | Ver el aviso completo en `backend/app/seed/varieties.py`. |
@@ -227,22 +227,27 @@ fuente abierto del paquete R `meteospain` (no se pudo acceder directamente a
 la documentación oficial de juntadeandalucia.es desde el entorno de
 desarrollo). API pública, sin API key, ~100 estaciones, solo cubre Andalucía.
 
-- **Caché de estaciones** (`app/services/ria_sync.py`): la primera vez que
-  se necesita, se trae el listado real de estaciones y se cachea en
-  `station` (idempotente, `UNIQUE (provider_id, code)`). No se vuelve a
-  pedir a la red mientras haya alguna estación cacheada.
+- **Caché de estaciones** (`app/services/ria_sync.py`): se trae el listado
+  real de estaciones y se cachea en `station` (idempotente,
+  `UNIQUE (provider_id, code)`). No se vuelve a pedir a la red mientras
+  haya alguna estación cacheada. Esto se hace de forma **eager en el
+  arranque de la API** (`app/bootstrap.py::init_db`), no perezosamente en
+  la primera parcela que se dé de alta: así la tabla `station` ya está
+  poblada "desde el principio", con un timeout corto para no alargar el
+  arranque si RIA no responde (se degrada a un aviso en el log y se
+  reintenta automáticamente al dar de alta o sincronizar una parcela).
   **Bug real corregido**: `latitud`/`longitud` de `estaciones` NO vienen en
   grados decimales, sino en un formato empaquetado `"DDMMSSsssH"`
   (grados-minutos-segundos + hemisferio, verificado contra `meteospain`,
   `R/utils.R::.parse_coords_dmsh`). La primera versión de este adaptador
   asumía grados decimales; el error de conversión se atrapaba en silencio
   como "estación con campos incompletos", así que nunca se cacheaba
-  ninguna estación real y la regla de los 10 km nunca encontraba nada
+  ninguna estación real y la regla de los 15 km nunca encontraba nada
   (p.ej. IFAPA Hinojosa del Duque, Córdoba) aunque existiera. Corregido en
   `_parse_dmsh_coord` (con test de regresión).
-- **Regla "menos de 10 km"**: al dar de alta una parcela (y también vía
+- **Regla "menos de 15 km"**: al dar de alta una parcela (y también vía
   `POST /v1/parcels/{id}/ria/sync`), si hay una estación RIA real a menos de
-  `ria_max_distance_km` (10 km, distancia puramente **horizontal** — no la
+  `ria_max_distance_km` (15 km, distancia puramente **horizontal** — no la
   `effective_distance_km` ponderada por desnivel del descubrimiento
   genérico anterior), se sincroniza su histórico diario y se usa con
   prioridad sobre ERA5-Land: estación real > reanálisis
@@ -352,7 +357,7 @@ que el frontend del módulo 7 funcionara — están marcados en el código):
 ```
 POST /v1/discovery/point
 GET  /v1/parcels
-POST /v1/parcels                        (importa automáticamente 5 años de histórico + estación RIA si hay una a <10 km)
+POST /v1/parcels                        (importa automáticamente 5 años de histórico + estación RIA si hay una a <15 km)
 GET  /v1/parcels/{id}
 PATCH /v1/parcels/{id}                  (nombre, variedad, superficie, capacidad de campo — lat/lon/altitud son inmutables)
 DELETE /v1/parcels/{id}                 (borra la parcela y todo lo que cuelga de ella: fuentes, observaciones, tratamientos)
@@ -360,7 +365,7 @@ PATCH /v1/parcels/{id}/variety
 POST /v1/parcels/{id}/resolve-sources?dry_run=
 POST /v1/parcels/{id}/backfill          (años explícitos, por defecto 25)
 POST /v1/parcels/{id}/backfill/sync     (solo lo que falta hasta hoy)
-POST /v1/parcels/{id}/ria/sync          (comprueba/sincroniza estación RIA real a <10 km)
+POST /v1/parcels/{id}/ria/sync          (comprueba/sincroniza estación RIA real a <15 km)
 POST /v1/parcels/{id}/fetch-forecast    (previsión real, próximos 7 días)
 POST /v1/parcels/{id}/simulate-sensors
 GET  /v1/parcels/{id}/daily
