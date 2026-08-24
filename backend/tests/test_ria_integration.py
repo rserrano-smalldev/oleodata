@@ -42,7 +42,16 @@ FAR_STATION_CODE = "TEST-RIA-FAR"  # a >15 km del punto de referencia
 # codigoEstacion real de RIA es numérico (ver docstring de ria_client.py): un
 # código de test numérico distinto, usado solo por el test de sincronización.
 NUMERIC_TEST_STATION_CODE = "9001"
-ALL_TEST_STATION_CODES = [NEAR_STATION_CODE, FAR_STATION_CODE, NUMERIC_TEST_STATION_CODE]
+TEST_PROVINCIA_ID = 5  # Córdoba, usada por todos los fixtures de este fichero
+_PLAIN_TEST_STATION_CODES = [NEAR_STATION_CODE, FAR_STATION_CODE, NUMERIC_TEST_STATION_CODE]
+# ensure_ria_stations_cached guarda `code` como "{provincia_id}:{codigoEstacion}"
+# (ver services/ria_sync.py: codigoEstacion no es único en toda la red RIA,
+# solo dentro de su provincia). Los fixtures que pasan por esa función usan
+# el código compuesto; los que construyen Station a mano usan el código
+# plano. La limpieza entre tests tiene que borrar ambas formas.
+ALL_TEST_STATION_CODES = _PLAIN_TEST_STATION_CODES + [
+    f"{TEST_PROVINCIA_ID}:{code}" for code in _PLAIN_TEST_STATION_CODES
+]
 
 
 class FakeRIAAdapter:
@@ -171,7 +180,11 @@ async def test_ensure_ria_stations_cached_decodes_real_dmsh_coordinate_format(db
     # del README está a pocos km de Hinojosa del Duque).
     nearby = await find_nearby_ria_station(db_session, expected_lat, expected_lon, max_km=1.0)
     assert nearby is not None
-    assert nearby.station.code == NEAR_STATION_CODE
+    # `code` es compuesto "{provincia_id}:{codigoEstacion}": codigoEstacion
+    # solo. es único DENTRO de una provincia (ver bug real documentado en el
+    # módulo), así que el código plano ya no basta como clave.
+    assert nearby.station.code == f"{TEST_PROVINCIA_ID}:{NEAR_STATION_CODE}"
+    assert nearby.station.metadata_json["codigo_estacion"] == NEAR_STATION_CODE
     assert nearby.horizontal_km < 1.0
 
     await _clean_ria_test_fixtures(db_session)
@@ -253,17 +266,20 @@ async def test_ensure_ria_stations_cached_is_idempotent_and_does_not_refetch(db_
     assert count >= 2
     assert fake.fetch_stations_calls == 1
 
+    composite_near = f"{TEST_PROVINCIA_ID}:{NEAR_STATION_CODE}"
+    composite_far = f"{TEST_PROVINCIA_ID}:{FAR_STATION_CODE}"
     stations = (
         await db_session.execute(
             select(Station).where(
                 Station.provider_id == provider.id,
-                Station.code.in_([NEAR_STATION_CODE, FAR_STATION_CODE]),
+                Station.code.in_([composite_near, composite_far]),
             )
         )
     ).scalars().all()
-    assert {s.code for s in stations} == {NEAR_STATION_CODE, FAR_STATION_CODE}
-    near = next(s for s in stations if s.code == NEAR_STATION_CODE)
+    assert {s.code for s in stations} == {composite_near, composite_far}
+    near = next(s for s in stations if s.code == composite_near)
     assert near.metadata_json["provincia_id"] == 5
+    assert near.metadata_json["codigo_estacion"] == NEAR_STATION_CODE
     assert near.elevation_m == 545.0
 
     # Ya hay estaciones cacheadas para este proveedor: NO debe volver a llamar a fetch_stations.
@@ -323,7 +339,7 @@ async def test_sync_parcel_ria_writes_synthetic_points_preserving_daily_minmax(d
         name="Estación de test cercana",
         location=WKTElement(f"POINT({PARCEL_LON} {PARCEL_LAT + 0.01})", srid=4326),
         elevation_m=545.0,
-        metadata_json={"provincia_id": 5},
+        metadata_json={"provincia_id": 5, "codigo_estacion": int(NUMERIC_TEST_STATION_CODE)},
     )
     db_session.add(station)
     await db_session.commit()

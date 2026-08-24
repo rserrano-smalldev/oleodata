@@ -225,13 +225,7 @@ real — ver la sección siguiente.
 Adaptador real en `app/services/ria_client.py`, verificado contra el código
 fuente abierto del paquete R `meteospain` (no se pudo acceder directamente a
 la documentación oficial de juntadeandalucia.es desde el entorno de
-desarrollo). API pública, sin API key, solo cubre Andalucía. La cifra de
-"~100 estaciones" que se repite en foros/documentación de terceros
-corresponde a **filas** de la respuesta de `estaciones`, no a estaciones
-físicas distintas: en pruebas reales, la API devolvió 123 filas pero solo
-~28 `codigoEstacion` únicos (varias filas comparten el mismo código,
-probablemente una fila por tipo de dato o resolución disponible en esa
-estación) — ver el aviso de deduplicación más abajo.
+desarrollo). API pública, sin API key, solo cubre Andalucía.
 
 - **Caché de estaciones** (`app/services/ria_sync.py`): se trae el listado
   real de estaciones y se cachea en `station` (idempotente,
@@ -242,27 +236,32 @@ estación) — ver el aviso de deduplicación más abajo.
   poblada "desde el principio", con un timeout corto para no alargar el
   arranque si RIA no responde (se degrada a un aviso en el log y se
   reintenta automáticamente al dar de alta o sincronizar una parcela).
-  **Bug real corregido**: `latitud`/`longitud` de `estaciones` NO vienen en
-  grados decimales, sino en un formato empaquetado `"DDMMSSsssH"`
-  (grados-minutos-segundos + hemisferio, verificado contra `meteospain`,
-  `R/utils.R::.parse_coords_dmsh`). La primera versión de este adaptador
-  asumía grados decimales; el error de conversión se atrapaba en silencio
-  como "estación con campos incompletos", así que nunca se cacheaba
-  ninguna estación real y la regla de los 15 km nunca encontraba nada
-  (p.ej. IFAPA Hinojosa del Duque, Córdoba) aunque existiera. Corregido en
-  `_parse_dmsh_coord` (con test de regresión).
-  **Hallazgo real posterior**: con el parseo ya corregido (0 filas
-  descartadas), la API devolvió 123 filas pero `station` terminó con solo
-  ~28 — no por otro bug, sino porque varias filas de la API comparten el
-  mismo `codigoEstacion` y el `UNIQUE (provider_id, code)` solo conserva la
-  primera de cada una. El log ahora distingue explícitamente "filas
-  devueltas" de "estaciones físicas distintas" (`ensure_ria_stations_cached`
-  ya no confundía candidatas con filas realmente insertadas). Con el listado
-  completo y correcto, la estación real más cercana a la finca de referencia
-  (Los Pedroches, Córdoba) sigue estando a más de 85 km: RIA, al ser una red
-  agroclimática centrada en zonas de regadío/invernadero, no tiene cobertura
-  en esa comarca de dehesa — esto no es un fallo del código, es una
-  limitación real y documentada de la cobertura de RIA.
+  **Dos bugs reales corregidos, encontrados con ayuda del usuario probando
+  contra la API real** (esta demo no tiene acceso directo a
+  juntadeandalucia.es desde su entorno de desarrollo):
+  1. `latitud`/`longitud` de `estaciones` NO vienen en grados decimales,
+     sino en un formato empaquetado `"DDMMSSsssH"` (grados-minutos-segundos
+     + hemisferio, verificado contra `meteospain`,
+     `R/utils.R::.parse_coords_dmsh`). La primera versión asumía grados
+     decimales; el error se atrapaba en silencio como "campo incompleto",
+     así que nunca se cacheaba ninguna estación real. Corregido en
+     `_parse_dmsh_coord` (con test de regresión).
+  2. Ya con el parseo de coordenadas corregido, la API devolvía 123 filas
+     pero `station` terminaba con solo 28 — y entre esas 28 no estaba una
+     estación real que el usuario sabía que existía (IFAPA Hinojosa del
+     Duque, Córdoba, confirmada en la web oficial de RIA en
+     `/riaweb/web/estacion/{provincia_id}/{codigoEstacion}`, provincia 14,
+     código 102). La causa: `codigoEstacion` **no es único en toda la red
+     RIA**, solo dentro de su provincia — la propia URL oficial lo
+     confirma. `station.code` se guardaba como el `codigoEstacion` a
+     secas, así que dos estaciones de provincias distintas con el mismo
+     número colisionaban en el `UNIQUE (provider_id, code)` y la segunda se
+     descartaba en silencio. Corregido guardando `code` como el par
+     compuesto `"{provincia_id}:{codigoEstacion}"` (que es exactamente como
+     la propia RIA direcciona sus estaciones), con `codigo_estacion` y
+     `provincia_id` conservados por separado en `metadata_json` para las
+     llamadas a `datosdiarios`. Con este arreglo, IFAPA Hinojosa del Duque
+     ya se cachea y se usa correctamente para la finca de referencia.
 - **Regla "menos de 15 km"**: al dar de alta una parcela (y también vía
   `POST /v1/parcels/{id}/ria/sync`), si hay una estación RIA real a menos de
   `ria_max_distance_km` (15 km, distancia puramente **horizontal** — no la

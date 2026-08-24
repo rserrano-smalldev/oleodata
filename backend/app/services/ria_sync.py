@@ -157,6 +157,7 @@ async def ensure_ria_stations_cached(session: AsyncSession, adapter: RIAAdapter 
             lat = _parse_dmsh_coord(st["latitud"])
             lon = _parse_dmsh_coord(st["longitud"])
             codigo = st["codigoEstacion"]
+            provincia_id = st["provincia_id"]
         except (KeyError, TypeError, ValueError) as exc:
             dropped.append((st, exc))
             continue
@@ -164,12 +165,21 @@ async def ensure_ria_stations_cached(session: AsyncSession, adapter: RIAAdapter 
         rows.append(
             {
                 "provider_id": provider.id,
-                "code": str(codigo),
+                # `codigoEstacion` NO es único a nivel de toda la red RIA: la
+                # propia web oficial direcciona sus estaciones como
+                # /estacion/{provincia_id}/{codigoEstacion} (confirmado con
+                # el caso real IFAPA Hinojosa del Duque, provincia 14, código
+                # 102 — que coincidía en número con otra estación de otra
+                # provincia y se descartaba en silencio antes de esta
+                # corrección). La clave real, y por tanto lo que se guarda
+                # como `code`, es el PAR (provincia_id, codigoEstacion).
+                "code": f"{provincia_id}:{codigo}",
                 "name": st.get("nombre") or f"Estación RIA {codigo}",
                 "location": WKTElement(f"POINT({lon} {lat})", srid=4326),
                 "elevation_m": float(altitud) if altitud is not None else None,
                 "metadata_json": {
-                    "provincia_id": st.get("provincia_id"),
+                    "provincia_id": provincia_id,
+                    "codigo_estacion": codigo,
                     "provincia_nombre": st.get("provincia_nombre"),
                     "bajoplastico": st.get("bajoplastico"),
                 },
@@ -331,10 +341,13 @@ async def _fetch_and_store_ria_range(
     end_date: date,
     adapter: RIAAdapter | None = None,
 ) -> tuple[int, int]:
-    provincia_id = (station.metadata_json or {}).get("provincia_id")
-    if provincia_id is None:
+    metadata = station.metadata_json or {}
+    provincia_id = metadata.get("provincia_id")
+    codigo_estacion = metadata.get("codigo_estacion")
+    if provincia_id is None or codigo_estacion is None:
         raise ValueError(
-            f"Estación RIA {station.code!r} cacheada sin provincia_id: no se puede pedir su histórico."
+            f"Estación RIA {station.code!r} cacheada sin provincia_id/codigo_estacion: "
+            "no se puede pedir su histórico."
         )
 
     adapter = adapter or RIAAdapter()
@@ -344,7 +357,7 @@ async def _fetch_and_store_ria_range(
     for chunk_start, chunk_end in _iter_year_chunks(start_date, end_date):
         logger.info("RIA source=%s estación=%s: bloque %s -> %s", source.code, station.code, chunk_start, chunk_end)
         daily_rows = await adapter.fetch_daily_range(
-            int(provincia_id), int(station.code), chunk_start, chunk_end
+            int(provincia_id), int(codigo_estacion), chunk_start, chunk_end
         )
 
         rows = []
