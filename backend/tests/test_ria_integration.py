@@ -25,6 +25,7 @@ from app.services.backfill import _ensure_era5_source
 from app.services.ria_sync import (
     RIA_LATENCY_DAYS,
     NearbyStation,
+    _parse_dmsh_coord,
     ensure_ria_stations_cached,
     find_nearby_ria_station,
     sync_parcel_ria,
@@ -101,6 +102,71 @@ async def _ensure_test_parcel(session) -> Parcel:
     await session.commit()
     await session.refresh(parcel)
     return parcel
+
+
+def test_parse_dmsh_coord_matches_meteospain_formula():
+    """La API real de `estaciones` da latitud/longitud en formato empaquetado
+    "DDMMSSsssH" (grados, minutos, segundos×1000, hemisferio), NO en grados
+    decimales — verificado contra meteospain (R/utils.R, .parse_coords_dmsh).
+    Usar float() directamente sobre ese texto (el bug real reportado: RIA
+    nunca encontraba ninguna estación, ni siquiera IFAPA Hinojosa del Duque,
+    porque ninguna se llegaba a cachear) lanza ValueError; aquí se decodifica
+    correctamente.
+    """
+    # 38°30'18.000" N == 38 + 30/60 + 18/3600 == 38.505
+    assert _parse_dmsh_coord("383018000N") == 38.505
+    # 5°09'00.000" W == -(5 + 9/60) == -5.15
+    assert _parse_dmsh_coord("050900000W") == -5.15
+    # Hemisferios N/E positivos, S/W negativos.
+    assert _parse_dmsh_coord("100000000E") == 10.0
+    assert _parse_dmsh_coord("100000000S") == -10.0
+
+    # Si la API cambiara a grados decimales, no debe romperse: se usan tal cual.
+    assert _parse_dmsh_coord("38.521823") == 38.521823
+    assert _parse_dmsh_coord(-5.159543633627551) == -5.159543633627551
+
+
+async def test_ensure_ria_stations_cached_decodes_real_dmsh_coordinate_format(db_session):
+    """Reproduce el formato REAL de la API (no el decimal simplificado que
+    usan el resto de tests de este fichero) para una estación equivalente a
+    IFAPA Hinojosa del Duque (Córdoba, ~38.48 N, 5.14 W): confirma que con el
+    parser corregido SÍ se cachea y SÍ se encuentra por proximidad, cerrando
+    el bug real reportado por el usuario.
+    """
+    await _clean_ria_test_fixtures(db_session)
+
+    hinojosa_lat_dmsh = "382852000N"  # 38 + 28/60 + 52/3600 = 38.48111...
+    hinojosa_lon_dmsh = "050826000W"  # -(5 + 8/60 + 26/3600) = -5.14055...
+
+    fake = FakeRIAAdapter(
+        stations=[
+            {
+                "codigoEstacion": NEAR_STATION_CODE,
+                "nombre": "IFAPA Hinojosa del Duque (test)",
+                "provincia_id": 5,
+                "provincia_nombre": "Córdoba",
+                "altitud": 608,
+                "latitud": hinojosa_lat_dmsh,
+                "longitud": hinojosa_lon_dmsh,
+                "bajoplastico": False,
+            }
+        ]
+    )
+
+    count = await ensure_ria_stations_cached(db_session, adapter=fake)
+    assert count == 1
+
+    expected_lat = 38 + 28 / 60 + 52 / 3600
+    expected_lon = -(5 + 8 / 60 + 26 / 3600)
+
+    # A ~10 km del punto real, debe encontrarse (la parcela de referencia
+    # del README está a pocos km de Hinojosa del Duque).
+    nearby = await find_nearby_ria_station(db_session, expected_lat, expected_lon, max_km=1.0)
+    assert nearby is not None
+    assert nearby.station.code == NEAR_STATION_CODE
+    assert nearby.horizontal_km < 1.0
+
+    await _clean_ria_test_fixtures(db_session)
 
 
 async def test_ensure_ria_stations_cached_is_idempotent_and_does_not_refetch(db_session):

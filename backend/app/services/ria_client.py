@@ -23,6 +23,16 @@ unidades, este adaptador NO mapea esos dos campos: solo trae temperatura,
 humedad relativa, viento medio y precipitación, que son inequívocos. Antes
 de usar radiación/ET0 de RIA en producción, verificar sus unidades contra
 la documentación oficial de la Junta de Andalucía.
+
+IMPORTANTE — formato de coordenadas: `estaciones` NO devuelve `latitud`/
+`longitud` en grados decimales, sino como texto empaquetado
+`"DDMMSSsssH"` (grados 2 dígitos, minutos 2 dígitos, segundos×1000 en 5
+dígitos, y una letra de hemisferio N/S/E/W), verificado en el código fuente
+de `meteospain` (`R/utils.R`, función `.parse_coords_dmsh`, autor Rubén F.
+Casal). Este adaptador devuelve esos campos EN CRUDO, tal cual los da la
+API (fetch_stations no los convierte): quien los use debe decodificarlos —
+ver `app/services/ria_sync.py::_parse_dmsh_coord`, que también acepta
+grados decimales por si la API cambia de formato en el futuro.
 """
 
 from datetime import date

@@ -231,6 +231,15 @@ desarrollo). API pública, sin API key, ~100 estaciones, solo cubre Andalucía.
   se necesita, se trae el listado real de estaciones y se cachea en
   `station` (idempotente, `UNIQUE (provider_id, code)`). No se vuelve a
   pedir a la red mientras haya alguna estación cacheada.
+  **Bug real corregido**: `latitud`/`longitud` de `estaciones` NO vienen en
+  grados decimales, sino en un formato empaquetado `"DDMMSSsssH"`
+  (grados-minutos-segundos + hemisferio, verificado contra `meteospain`,
+  `R/utils.R::.parse_coords_dmsh`). La primera versión de este adaptador
+  asumía grados decimales; el error de conversión se atrapaba en silencio
+  como "estación con campos incompletos", así que nunca se cacheaba
+  ninguna estación real y la regla de los 10 km nunca encontraba nada
+  (p.ej. IFAPA Hinojosa del Duque, Córdoba) aunque existiera. Corregido en
+  `_parse_dmsh_coord` (con test de regresión).
 - **Regla "menos de 10 km"**: al dar de alta una parcela (y también vía
   `POST /v1/parcels/{id}/ria/sync`), si hay una estación RIA real a menos de
   `ria_max_distance_km` (10 km, distancia puramente **horizontal** — no la

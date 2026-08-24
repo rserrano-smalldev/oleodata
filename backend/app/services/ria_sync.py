@@ -30,9 +30,20 @@ Tres responsabilidades separadas:
       mínimo/máximo diario.
   Esta convención se declara aquí y en el README: es una aproximación
   explícita, no un intento de fingir resolución horaria real.
+
+Nota sobre el bug real encontrado y corregido: la primera versión de este
+módulo asumía que `latitud`/`longitud` de `estaciones` venían en grados
+decimales y hacía `float(valor)` directamente. La API real los da en un
+formato empaquetado `"DDMMSSsssH"` (grados-minutos-segundos + hemisferio,
+ver `_parse_dmsh_coord` más abajo); `float()` sobre ese texto lanza
+ValueError, que quedaba silenciosamente atrapado como "campo incompleto" —
+así que NINGUNA estación se llegaba a cachear nunca, y por eso
+`find_nearby_ria_station` no encontraba ninguna aunque existiera una
+estación real a menos de 10 km (p.ej. IFAPA Hinojosa del Duque, Córdoba).
 """
 
 import logging
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 
@@ -94,6 +105,31 @@ class RIASyncSummary:
     already_up_to_date: bool = False
 
 
+_DMSH_PATTERN = re.compile(r"^(\d{2})(\d{2})(\d{5})([NSEW])$")
+
+
+def _parse_dmsh_coord(raw) -> float:
+    """Decodifica una coordenada de `estaciones`.
+
+    Verificado contra el código fuente de `meteospain` (`R/utils.R`,
+    `.parse_coords_dmsh`): la API real da `latitud`/`longitud` en un
+    formato empaquetado "DDMMSSsssH" — grados (2 dígitos), minutos
+    (2 dígitos), segundos×1000 (5 dígitos) y una letra de hemisferio
+    N/S/E/W — no en grados decimales. Sur y Oeste son negativos.
+
+    Si el valor no encaja en ese formato exacto, se intenta como grados
+    decimales directamente (por si la API cambiara de formato en el
+    futuro): no se asume ciegamente un único formato para siempre.
+    """
+    text_value = str(raw).strip().upper()
+    match = _DMSH_PATTERN.match(text_value)
+    if match:
+        degrees, minutes, sec_thousandths, hemisphere = match.groups()
+        value = int(degrees) + int(minutes) / 60 + (int(sec_thousandths) / 1000) / 3600
+        return -value if hemisphere in ("S", "W") else value
+    return float(text_value)
+
+
 async def ensure_ria_stations_cached(session: AsyncSession, adapter: RIAAdapter | None = None) -> int:
     """Cachea el listado real de estaciones RIA la primera vez que se necesita.
 
@@ -117,8 +153,8 @@ async def ensure_ria_stations_cached(session: AsyncSession, adapter: RIAAdapter 
     rows = []
     for st in stations:
         try:
-            lat = float(st["latitud"])
-            lon = float(st["longitud"])
+            lat = _parse_dmsh_coord(st["latitud"])
+            lon = _parse_dmsh_coord(st["longitud"])
             codigo = st["codigoEstacion"]
         except (KeyError, TypeError, ValueError):
             logger.warning("Estación RIA con campos incompletos, se ignora: %r", st)
@@ -137,6 +173,19 @@ async def ensure_ria_stations_cached(session: AsyncSession, adapter: RIAAdapter 
                     "bajoplastico": st.get("bajoplastico"),
                 },
             }
+        )
+
+    if stations and not rows:
+        # Si ninguna estación de una respuesta no vacía se pudo cachear, es
+        # casi seguro un bug sistemático de parseo (p.ej. un cambio de
+        # formato de coordenadas), no "campos incompletos" puntuales: esto
+        # ya ocurrió una vez (ver docstring del módulo) y dejaba a
+        # find_nearby_ria_station sin ninguna estación con la que trabajar,
+        # sin ningún error visible.
+        logger.error(
+            "RIA: la API devolvió %d estaciones pero NINGUNA se pudo cachear "
+            "(revisar el formato de latitud/longitud, ver _parse_dmsh_coord).",
+            len(stations),
         )
 
     if not rows:
