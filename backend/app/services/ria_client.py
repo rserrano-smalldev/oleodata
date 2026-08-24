@@ -13,7 +13,19 @@ documenta con ejemplos de uso reales.
       GET {base}/agriculturaypesca/ifapa/riaws/estaciones
   - Datos diarios de una estación:
       GET {base}/agriculturaypesca/ifapa/riaws/datosdiarios/forceEt0/
-          {provincia_id}/{codigoEstacion}/{fecha_inicio:YYYYMMDD}/{fecha_fin:YYYYMMDD}
+          {provincia_id}/{codigoEstacion}/{fecha_inicio:YYYY-MM-DD}/{fecha_fin:YYYY-MM-DD}
+
+IMPORTANTE — formato de fecha en `datosdiarios`: es `YYYY-MM-DD` CON
+GUIONES, no `YYYYMMDD` sin separadores. Una primera versión de este
+adaptador asumía `YYYYMMDD` (una lectura demasiado literal del ejemplo de
+`meteospain`) y por eso TODAS las peticiones devolvían 400 Bad Request,
+sin excepción, para cualquier estación y cualquier rango de fechas — algo
+que en su momento se interpretó erróneamente como "huecos reales de la
+estación" o "límite de tamaño de rango". El formato real se confirmó
+revisando la construcción exacta de la fecha en el código fuente de
+`meteospain` (`R/ria_helpers.R`, función `ria_stamp`, que usa
+`lubridate::stamp("2001-12-25", ...)` — la plantilla de ejemplo lleva
+guiones).
 
 IMPORTANTE — qué se mapea y qué no: la respuesta de datos diarios incluye
 también `radiacion` y datos de evapotranspiración (de ahí "forceEt0" en la
@@ -106,7 +118,7 @@ class RIAAdapter:
         path = (
             f"/agriculturaypesca/ifapa/riaws/datosdiarios/forceEt0/"
             f"{provincia_id}/{codigo_estacion}/"
-            f"{start_date.strftime('%Y%m%d')}/{end_date.strftime('%Y%m%d')}"
+            f"{start_date.isoformat()}/{end_date.isoformat()}"
         )
         client = self._client or httpx.AsyncClient(timeout=60)
         owns_client = self._client is None

@@ -296,31 +296,35 @@ desarrollo). API pública, sin API key, solo cubre Andalucía.
   diario. Esto reproduce el mínimo/máximo diario exactos, pero una media
   calculada sobre esos 3 puntos es una aproximación. Documentado en la
   cabecera de `app/services/ria_sync.py`.
-- **400 Bad Request en `datosdiarios` (no siempre es el tamaño del rango)**:
-  pedir ~2 años de golpe devuelve 400. Pero al probarlo con una estación
-  real concreta (IFAPA Hinojosa del Duque, cerca de la finca de
-  referencia, con histórico real desde al menos 2006), se confirmó que un
-  400 **también puede significar que esa estación tiene un hueco real de
-  datos en parte del periodo pedido** — se vio un hueco real en 2022 que
-  no implicaba que el resto del histórico (incluidos años posteriores)
-  también faltara. Por eso `_fetch_daily_range_resilient` parte el rango
-  en dos y reintenta cada mitad, con un tope acotado
-  (`RIA_MAX_RETRY_SHRINKS = 4`, suficiente para aislar huecos de unas
-  semanas sin descartar el año entero) y sin propagar nunca el 400 hacia
-  arriba — la primera versión de este arreglo no tenía tope real y, al
-  toparse con un hueco, acababa troceando día a día durante años enteros
-  (cientos de peticiones reales e inútiles a la API de la Junta de
-  Andalucía). Una segunda versión añadía además un "circuit breaker" que
-  abortaba el resto de la sincronización si varios bloques anuales
-  seguidos salían vacíos — **se quitó**, porque un año con huecos no dice
-  nada sobre si los años siguientes tienen datos buenos (como pasó en la
-  práctica), así que abortar por eso perdía histórico real que sí
-  existía. Ahora simplemente se sigue con el resto de bloques, y solo un
-  error que no sea 400 (fallo de red, 5xx) se propaga de verdad. Limitación
-  conocida: la sincronización incremental (`sync_parcel_ria`) avanza desde
-  el último dato guardado, así que un hueco al principio del histórico no
-  se reintenta automáticamente en sincronizaciones futuras (solo avanza
-  hacia adelante, no rellena huecos hacia atrás).
+- **400 Bad Request en `datosdiarios` — bug real: formato de fecha, no
+  tamaño de rango ni huecos de la estación**: durante el desarrollo se
+  probaron dos hipótesis, ambas descartadas por evidencia real. Primero se
+  pensó que pedir ~2 años de golpe era demasiado rango; después, probando
+  con una estación real concreta (IFAPA Hinojosa del Duque, a 4.8 km de la
+  finca de referencia, con histórico real desde al menos 2006 según
+  comprobación manual del usuario), se vio que el 400 aparecía incluso
+  pidiendo un solo día — lo que en su momento se interpretó como "un hueco
+  real de esa estación en ese periodo". Las dos explicaciones eran
+  incorrectas: la causa real, confirmada revisando la construcción exacta
+  de la URL en el código fuente del paquete R `meteospain`
+  (`R/ria_helpers.R::ria_stamp`, que usa
+  `lubridate::stamp("2001-12-25", ...)`), es que `ria_client.py` construía
+  la fecha como `YYYYMMDD` sin separadores en vez de `YYYY-MM-DD` con
+  guiones — así que **todas** las peticiones a `datosdiarios`, para
+  cualquier estación y cualquier rango, devolvían 400 siempre. Corregido
+  usando `date.isoformat()` (ver cabecera de `app/services/ria_client.py`).
+  El troceo resiliente de rangos (`_fetch_daily_range_resilient`,
+  `RIA_MAX_RETRY_SHRINKS = 4`) y la ausencia de un "circuit breaker" que
+  aborte la sincronización ante bloques anuales vacíos se mantienen tal
+  cual, no porque el bug real fuera de rango/huecos, sino porque son una
+  defensa razonable para el día en que una estación sí tenga un hueco real
+  de datos: si eso ocurre, ahora se sigue con el resto de bloques en vez de
+  fallar entera, y solo un error que no sea 400 (fallo de red, 5xx) se
+  propaga de verdad. Limitación conocida: la sincronización incremental
+  (`sync_parcel_ria`) avanza desde el último dato guardado, así que un
+  hueco al principio del histórico no se reintenta automáticamente en
+  sincronizaciones futuras (solo avanza hacia adelante, no rellena huecos
+  hacia atrás).
 - El motor de recomendaciones (`app/services/agronomy/engine.py`) combina
   RIA + ERA5-Land + previsión con el mismo criterio de prioridad genérico
   que ya usa `/daily` (`app/services/daily_series.py`): para cada día gana

@@ -40,6 +40,14 @@ ValueError, que quedaba silenciosamente atrapado como "campo incompleto" —
 así que NINGUNA estación se llegaba a cachear nunca, y por eso
 `find_nearby_ria_station` no encontraba ninguna aunque existiera una
 estación real a menos de 15 km (p.ej. IFAPA Hinojosa del Duque, Córdoba).
+
+Segundo bug real, más sutil: una vez encontrada la estación, `sync_parcel_ria`
+devolvía siempre 0 días. La causa NO era el tamaño del rango pedido ni que
+la estación tuviera huecos reales (ambas cosas se llegaron a sospechar):
+era que `ria_client.py` construía la fecha como `YYYYMMDD` en vez de
+`YYYY-MM-DD` (ver nota en ese módulo), así que la API devolvía 400 Bad
+Request para CUALQUIER petición, siempre, fuera cual fuera el rango o la
+estación. Corregido usando `date.isoformat()`.
 """
 
 import logging
@@ -62,16 +70,19 @@ from app.services.sources import get_or_create_source, get_provider_by_code
 
 logger = logging.getLogger(__name__)
 
-RIA_CHUNK_YEARS = 1  # bloques de 2 años daban 400 Bad Request; con 1 año se ha visto menos, pero no es garantía
-# Un 400 puede deberse tanto a un rango demasiado grande como a que la
-# estación tenga un hueco real de datos en parte de ese periodo (confirmado:
-# IFAPA Hinojosa del Duque tenía huecos en 2022 pero SÍ tiene histórico real
-# desde 2006). Con un tope de particiones demasiado bajo (probado con 2:
-# como mucho cuartos de año), un hueco de unas semanas hacía fallar el
-# CUARTO entero que lo contenía, perdiendo meses de datos buenos que sí
-# existían alrededor. 4 permite aislar huecos de unas pocas semanas sin
-# descartar el resto del año, manteniendo el peor caso acotado (como mucho
-# 1+2+4+8+16 = 31 peticiones por bloque de RIA_CHUNK_YEARS, nunca cientos).
+RIA_CHUNK_YEARS = 1  # trocear el histórico igualmente, aunque el 400 sistemático real ya está corregido (ver ria_client.py)
+# NOTA HISTÓRICA: durante el desarrollo, un formato de fecha incorrecto en
+# ria_client.py (YYYYMMDD en vez de YYYY-MM-DD) hacía que TODA petición a
+# datosdiarios devolviera 400, para cualquier rango y cualquier estación —
+# en su momento se interpretó erróneamente como "rango demasiado grande" o
+# "la estación tiene huecos reales", ninguna de las dos cosas era la causa
+# real. Con la fecha ya corregida, un 400 aislado debería ser mucho más
+# raro, pero se conserva esta partición defensiva (troceo por años +
+# reintento partiendo el rango) por si la API rechaza de verdad algún
+# rango o periodo concreto en el futuro: es preferible histórico parcial
+# declarado a un 500 que tira toda la sincronización. Tope de particiones
+# acotado a propósito (ver RIA_MAX_RETRY_SHRINKS) para no acabar troceando
+# día a día durante años si el 400 persistiera por otro motivo.
 RIA_MAX_RETRY_SHRINKS = 4
 RIA_LATENCY_DAYS = 1  # sin confirmar oficialmente cuánto tarda RIA en publicar el día en curso
 INSERT_BATCH_SIZE = 5000
