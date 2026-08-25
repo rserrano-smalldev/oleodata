@@ -467,6 +467,19 @@ de la parcela con:
   futuro, dentro de la previsión) y panel con una etiqueta explícita de si
   la recomendación se basa en histórico real o en previsión.
 - Importación de tratamientos con previsualización de errores por fila.
+- **Cache-busting de `/static/js/app.js`**: bug real visto en producción — al
+  añadir la tabla de RIA, el botón nuevo aparecía (el HTML se renderiza en
+  el servidor, sin caché) pero "Aplicar filtro" no hacía nada, porque el
+  navegador seguía usando una copia cacheada del `app.js` de antes de esa
+  función existir (el contenedor del frontend no monta volumen, así que un
+  rebuild sí trae el JS nuevo al servidor, pero la URL `/static/js/app.js`
+  no cambia entre despliegues y algunos navegadores no vuelven a pedirlo).
+  Corregido añadiendo `?v=` a la URL con un valor calculado en el arranque
+  a partir de la fecha de modificación real del fichero
+  (`app/main.py::_APP_JS_PATH`), así que cambia solo cuando el fichero
+  cambia. Si tras un despliegue algo del frontend "aparece pero no
+  funciona", forzar una recarga sin caché (Ctrl+Shift+R) sigue siendo el
+  primer paso a probar.
 
 ## Tests
 

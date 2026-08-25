@@ -1,3 +1,4 @@
+import os
 from datetime import date, timedelta
 from urllib.parse import quote
 
@@ -15,6 +16,18 @@ settings = get_settings()
 app = FastAPI(title="OleaData — Frontend (demo)")
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 templates = Jinja2Templates(directory="app/templates")
+
+# Cache-busting para /static/js/app.js: sin esto, el navegador puede seguir
+# usando una copia cacheada del JS de una versión anterior de la imagen
+# incluso después de reconstruir y desplegar el contenedor (el HTML sí se
+# renderiza siempre en el servidor, sin caché, pero el <script> enlazado
+# con la misma URL no se re-descarga si el navegador cree que sigue
+# vigente) — visto en producción como "el botón nuevo aparece pero al
+# pulsarlo no pasa nada". Se calcula una vez al arrancar, a partir de la
+# fecha de modificación real del fichero (cambia en cada build de la
+# imagen), y se añade como `?v=` a la URL en las plantillas.
+_APP_JS_PATH = os.path.join(os.path.dirname(__file__), "static", "js", "app.js")
+templates.env.globals["asset_version"] = str(int(os.path.getmtime(_APP_JS_PATH)))
 
 
 @app.exception_handler(ApiError)
