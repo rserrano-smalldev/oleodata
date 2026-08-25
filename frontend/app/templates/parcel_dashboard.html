@@ -98,6 +98,20 @@
   </p>
   <button onclick="runRiaSync({{ parcel.id }})">Comprobar / sincronizar estación RIA</button>
   <span id="ria-status" class="small"></span>
+
+  <h3>Consultar histórico RIA en tabla</h3>
+  <div class="row">
+    <div><label>Desde</label><input type="date" id="ria-start"></div>
+    <div><label>Hasta</label><input type="date" id="ria-end"></div>
+  </div>
+  <div class="check-row" id="ria-variables">
+    <label><input type="checkbox" value="temperature_2m" checked> Temperatura</label>
+    <label><input type="checkbox" value="precipitation" checked> Precipitación</label>
+    <label><input type="checkbox" value="relative_humidity_2m"> Humedad relativa</label>
+    <label><input type="checkbox" value="wind_speed_10m"> Viento</label>
+  </div>
+  <button onclick="applyRiaFilter({{ parcel.id }})">Aplicar filtro</button>
+  <div id="ria-table" class="table-wrap"></div>
 </div>
 
 <div class="card">

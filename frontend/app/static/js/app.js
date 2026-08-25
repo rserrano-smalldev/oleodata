@@ -306,9 +306,44 @@ async function runRiaSync(parcelId) {
     if (result.station_found) {
       await drawHistoryChart(parcelId);
       loadRecommendations(parcelId);
+      const riaStart = document.getElementById("ria-start");
+      const riaEnd = document.getElementById("ria-end");
+      if (riaStart && riaEnd && result.start_date && result.end_date) {
+        riaStart.value = result.start_date;
+        riaEnd.value = result.end_date;
+      }
+      await applyRiaFilter(parcelId);
     }
   } catch (e) {
     status.textContent = "Error: " + e.message;
+  }
+}
+
+async function applyRiaFilter(parcelId) {
+  const start = document.getElementById("ria-start").value;
+  const end = document.getElementById("ria-end").value;
+  const variables = checkedValues("ria-variables");
+  const container = document.getElementById("ria-table");
+  if (!start || !end) {
+    container.innerHTML = '<p class="error-text">Elige fecha de inicio y fin (sincroniza la estación RIA primero si no hay rango disponible).</p>';
+    return;
+  }
+  if (!variables.length) { container.innerHTML = '<p class="error-text">Marca al menos una variable.</p>'; return; }
+
+  container.innerHTML = "<p class='small'>Consultando…</p>";
+  try {
+    const params = new URLSearchParams({
+      provider: "ria_andalucia",
+      start: `${start}T00:00:00Z`,
+      end: `${end}T23:59:59Z`,
+      variables: variables.join(","),
+    });
+    const data = await getJson(`/ui/parcel/${parcelId}/observations.json?${params.toString()}`);
+    const items = data.points.map((p) => ({ key: p.timestamp, variable: p.variable, value: p.value }));
+    const { columns, rows } = pivot(items, variables);
+    renderTable("ria-table", "Instante (UTC)", columns, rows);
+  } catch (e) {
+    container.innerHTML = `<p class="error-text">${e.message}</p>`;
   }
 }
 
@@ -452,5 +487,15 @@ function setDefaultFilterDates() {
     start.setDate(start.getDate() - 90);
     histStart.value = start.toISOString().slice(0, 10);
     histEnd.value = end.toISOString().slice(0, 10);
+  }
+
+  const riaStart = document.getElementById("ria-start");
+  const riaEnd = document.getElementById("ria-end");
+  if (riaStart && riaEnd) {
+    const end = new Date();
+    const start = new Date();
+    start.setDate(start.getDate() - 90);
+    riaStart.value = start.toISOString().slice(0, 10);
+    riaEnd.value = end.toISOString().slice(0, 10);
   }
 }

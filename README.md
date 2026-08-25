@@ -454,6 +454,15 @@ de la parcela con:
   filtro y tabla paginada sobre las lecturas simuladas.
 - **Previsión**: botón para traer los próximos 7 días reales de Open-Meteo
   y tabla con el resultado.
+- **Estación RIA**: además del botón de sincronización, el mismo patrón de
+  filtro (rango de fechas + variables) y tabla paginada que histórico y
+  simulado, pero sobre las observaciones crudas de la fuente `ria_andalucia`
+  (`GET /v1/parcels/{id}/observations?provider=ria_andalucia`, el mismo
+  endpoint genérico que ya usan sensores simulados y previsión — no hizo
+  falta ningún endpoint nuevo). Solo expone temperatura, humedad relativa,
+  viento y precipitación (lo único que RIA mapea, ver más abajo); al
+  sincronizar, el filtro se rellena automáticamente con el rango recién
+  importado.
 - **Recomendaciones**: selector de variedad, selector de día (puede ser
   futuro, dentro de la previsión) y panel con una etiqueta explícita de si
   la recomendación se basa en histórico real o en previsión.
